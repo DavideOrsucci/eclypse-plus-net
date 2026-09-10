@@ -1,5 +1,6 @@
 """Module containing the network infrastructure extension for the ECLYPSE framework."""
 
+import heapq
 from collections import (
     defaultdict,
     deque,
@@ -273,6 +274,54 @@ class Network(Infrastructure):
 
                 self[u][v]["latency"] = d_proc + d_prop + d_transm
 
+    def _all_pairs_dijkstra(self) -> dict:
+        """Calculate the shortest paths for all nodes in a optimized manner."""
+        full_paths = {}
+
+        # Pre-construction of the adjacency list for ultra-fast O(1) access
+        # Bypass NetworkX overhead during graph traversal
+        adj = {
+            u: [(v, data.get("cost", 1.0)) for v, data in self[u].items()]
+            for u in self.nodes()
+        }
+
+        # Execution of Dijkstra for each source node
+        for source in self.nodes():
+            distances = {source: 0.0}
+            predecessors = {source: None}
+            pq = [(0.0, source)]  # Priority queue (distance, node)
+
+            while pq:
+                current_dist, u = heapq.heappop(pq)
+
+                # Ignore obsolete paths if we have already found a better route.
+                if current_dist > distances.get(u, float("inf")):
+                    continue
+
+                for v, weight in adj[u]:
+                    distance = current_dist + weight
+
+                    # Relax the edge
+                    if distance < distances.get(v, float("inf")):
+                        distances[v] = distance
+                        predecessors[v] = u
+                        heapq.heappush(pq, (distance, v))
+
+            # Reconstruction of paths in the format expected by Eclypse
+            source_paths = {}
+            for target in distances:
+                path = []
+                curr = target
+                while curr is not None:
+                    path.append(curr)
+                    curr = predecessors.get(curr)
+                path.reverse()
+                source_paths[target] = path
+
+            full_paths[source] = source_paths
+
+        return full_paths
+
     def build_routing_tables(self):
         """Pre-calculate the Forwarding Information Base (FIB) for all nodes.
 
@@ -280,7 +329,7 @@ class Network(Infrastructure):
         """
         self.fib = defaultdict(dict)
         # Save all complete paths in a class variable
-        self.full_paths = dict(nx.all_pairs_dijkstra_path(self, weight="cost"))
+        self.full_paths = self._all_pairs_dijkstra()
 
         for source_node, targets in self.full_paths.items():
             for target_node, p in targets.items():
@@ -348,7 +397,7 @@ class Network(Infrastructure):
                 if bits_service_capacity >= front_packet_bits:
                     bits_service_capacity -= front_packet_bits
                     queue.popleft()
-                    # Aggiornamento diretto dei byte dell'arco
+                    # Update of the total bytes in the link queue after dequeuing a packet
                     edge["queue_bytes"] -= front_packet.size
                 else:
                     break
