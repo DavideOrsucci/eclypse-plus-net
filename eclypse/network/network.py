@@ -262,7 +262,8 @@ class Network(Infrastructure):
             # If we don't have telemetry data for this link during this step,
             # we can optionally set a default latency
             else:
-                d_proc = self.processing_time(u, v) * SEC_TO_MS
+                # d_proc = self.processing_time(u, v) * SEC_TO_MS
+                d_proc = d_proc = self.nodes[u].get("processing_time", 0.0) * SEC_TO_MS
                 speed = data.get("propagation_speed_km_s", MIN_PROPAGATION_SPEED)
                 length = data.get("length_km", MIN_LENGTH_KM)
 
@@ -276,50 +277,61 @@ class Network(Infrastructure):
 
     def _all_pairs_dijkstra(self) -> dict:
         """Calculate the shortest paths for all nodes in a optimized manner."""
+        nodes = list(self.nodes())
+        num_nodes = len(nodes)
+        
+        # Creation of a bidirectional mapping between node identifiers and integer indices
+        node_to_id = {node: i for i, node in enumerate(nodes)}
+        id_to_node = nodes # The index of the list is the ID
+        
+        # Build the adjacency list representation of the graph for efficient access
+        adj = [[] for _ in range(num_nodes)]
+        for u in nodes:
+            u_id = node_to_id[u]
+            for v, data in self[u].items():
+                adj[u_id].append((node_to_id[v], data.get('cost', 1.0)))
+                
         full_paths = {}
-
-        # Pre-construction of the adjacency list for ultra-fast O(1) access
-        # Bypass NetworkX overhead during graph traversal
-        adj = {
-            u: [(v, data.get("cost", 1.0)) for v, data in self[u].items()]
-            for u in self.nodes()
-        }
-
-        # Execution of Dijkstra for each source node
-        for source in self.nodes():
-            distances = {source: 0.0}
-            predecessors = {source: None}
-            pq = [(0.0, source)]  # Priority queue (distance, node)
-
+        
+        for source_id in range(num_nodes):
+            # Native array instead of indices for performance in Dijkstra's algorithm
+            distances = [float('inf')] * num_nodes
+            distances[source_id] = 0.0
+            predecessors = [-1] * num_nodes
+            
+            pq = [(0.0, source_id)]
+            
             while pq:
-                current_dist, u = heapq.heappop(pq)
-
-                # Ignore obsolete paths if we have already found a better route.
-                if current_dist > distances.get(u, float("inf")):
+                current_dist, u_id = heapq.heappop(pq)
+                
+                if current_dist > distances[u_id]:
                     continue
-
-                for v, weight in adj[u]:
+                    
+                for v_id, weight in adj[u_id]:
                     distance = current_dist + weight
-
-                    # Relax the edge
-                    if distance < distances.get(v, float("inf")):
-                        distances[v] = distance
-                        predecessors[v] = u
-                        heapq.heappush(pq, (distance, v))
-
-            # Reconstruction of paths in the format expected by Eclypse
+                    
+                    if distance < distances[v_id]:
+                        distances[v_id] = distance
+                        predecessors[v_id] = u_id
+                        heapq.heappush(pq, (distance, v_id))
+            
+            # Reconstruct the paths from the predecessors array
+            source = id_to_node[source_id]
             source_paths = {}
-            for target in distances:
+            for target_id in range(num_nodes):
+                if distances[target_id] == float('inf'):
+                    continue
+                    
                 path = []
-                curr = target
-                while curr is not None:
-                    path.append(curr)
-                    curr = predecessors.get(curr)
+                curr = target_id
+                while curr != -1:
+                    path.append(id_to_node[curr])
+                    curr = predecessors[curr]
                 path.reverse()
-                source_paths[target] = path
-
+                source_paths[id_to_node[target_id]] = path
+                
             full_paths[source] = source_paths
-
+            
         return full_paths
 
     def build_routing_tables(self):
@@ -428,7 +440,8 @@ class Network(Infrastructure):
             )
             return None
 
-        d_proc = self.processing_time(u, v)
+        # d_proc = self.processing_time(u, v)
+        d_proc = self.nodes[u].get("processing_time", 0.0)
 
         # The calculation of the queue delay is done in O(1) using the tracking variable
         d_queue = edge["queue_bytes"] * BYTES_TO_BITS / R if R > 0 else 0.0
