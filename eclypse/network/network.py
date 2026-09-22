@@ -263,7 +263,7 @@ class Network(Infrastructure):
             # we can optionally set a default latency
             else:
                 # d_proc = self.processing_time(u, v) * SEC_TO_MS
-                d_proc = d_proc = self.nodes[u].get("processing_time", 0.0) * SEC_TO_MS
+                d_proc = self.nodes[u].get("processing_time", 0.0) * SEC_TO_MS
                 speed = data.get("propagation_speed_km_s", MIN_PROPAGATION_SPEED)
                 length = data.get("length_km", MIN_LENGTH_KM)
 
@@ -279,49 +279,50 @@ class Network(Infrastructure):
         """Calculate the shortest paths for all nodes in a optimized manner."""
         nodes = list(self.nodes())
         num_nodes = len(nodes)
-        
-        # Creation of a bidirectional mapping between node identifiers and integer indices
+
+        # Creation of a bidirectional mapping between node identifiers and integer
+        # indices
         node_to_id = {node: i for i, node in enumerate(nodes)}
-        id_to_node = nodes # The index of the list is the ID
-        
+        id_to_node = nodes  # The index of the list is the ID
+
         # Build the adjacency list representation of the graph for efficient access
         adj = [[] for _ in range(num_nodes)]
         for u in nodes:
             u_id = node_to_id[u]
             for v, data in self[u].items():
-                adj[u_id].append((node_to_id[v], data.get('cost', 1.0)))
-                
+                adj[u_id].append((node_to_id[v], data.get("cost", 1.0)))
+
         full_paths = {}
-        
+
         for source_id in range(num_nodes):
             # Native array instead of indices for performance in Dijkstra's algorithm
-            distances = [float('inf')] * num_nodes
+            distances = [float("inf")] * num_nodes
             distances[source_id] = 0.0
             predecessors = [-1] * num_nodes
-            
+
             pq = [(0.0, source_id)]
-            
+
             while pq:
                 current_dist, u_id = heapq.heappop(pq)
-                
+
                 if current_dist > distances[u_id]:
                     continue
-                    
+
                 for v_id, weight in adj[u_id]:
                     distance = current_dist + weight
-                    
+
                     if distance < distances[v_id]:
                         distances[v_id] = distance
                         predecessors[v_id] = u_id
                         heapq.heappush(pq, (distance, v_id))
-            
+
             # Reconstruct the paths from the predecessors array
             source = id_to_node[source_id]
             source_paths = {}
             for target_id in range(num_nodes):
-                if distances[target_id] == float('inf'):
+                if distances[target_id] == float("inf"):
                     continue
-                    
+
                 path = []
                 curr = target_id
                 while curr != -1:
@@ -329,9 +330,9 @@ class Network(Infrastructure):
                     curr = predecessors[curr]
                 path.reverse()
                 source_paths[id_to_node[target_id]] = path
-                
+
             full_paths[source] = source_paths
-            
+
         return full_paths
 
     def build_routing_tables(self):
@@ -409,7 +410,8 @@ class Network(Infrastructure):
                 if bits_service_capacity >= front_packet_bits:
                     bits_service_capacity -= front_packet_bits
                     queue.popleft()
-                    # Update of the total bytes in the link queue after dequeuing a packet
+                    # Update of the total bytes in the link queue after
+                    # dequeuing a packet
                     edge["queue_bytes"] -= front_packet.size
                 else:
                     break
