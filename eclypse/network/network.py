@@ -1,6 +1,5 @@
 """Module containing the network infrastructure extension for the ECLYPSE framework."""
 
-import heapq
 from collections import (
     defaultdict,
     deque,
@@ -8,6 +7,7 @@ from collections import (
 from dataclasses import dataclass
 
 import networkx as nx
+import rustworkx as rx
 
 from eclypse.graph import Infrastructure
 
@@ -276,60 +276,39 @@ class Network(Infrastructure):
                 self[u][v]["latency"] = d_proc + d_prop + d_transm
 
     def _all_pairs_dijkstra(self) -> dict:
-        """Calculate the shortest paths for all nodes in a optimized manner."""
-        nodes = list(self.nodes())
-        num_nodes = len(nodes)
+        """Calculate shortest paths between all pairs of nodes."""
+        # Initialize a directed graph in Rust using rustworkx
+        rx_graph = rx.PyDiGraph()
 
-        # Creation of a bidirectional mapping between node identifiers and integer
-        # indices
-        node_to_id = {node: i for i, node in enumerate(nodes)}
-        id_to_node = nodes  # The index of the list is the ID
+        # Bidirectional mapping:
+        # We need to map Eclypse node identifiers (strings)
+        # to Rust node indices (integers) and vice versa for the path reconstruction
+        node_to_rx = {}
+        rx_to_node = {}
 
-        # Build the adjacency list representation of the graph for efficient access
-        adj = [[] for _ in range(num_nodes)]
-        for u in nodes:
-            u_id = node_to_id[u]
-            for v, data in self[u].items():
-                adj[u_id].append((node_to_id[v], data.get("cost", 1.0)))
+        for node in self.nodes():
+            rx_id = rx_graph.add_node(node)
+            node_to_rx[node] = rx_id
+            rx_to_node[rx_id] = node
 
+        # Transfer the edges from the Eclypse graph to the Rust graph
+        # Save directly the cost attribute for OSPF routing
+        for u, v, data in self.edges(data=True):
+            cost = data.get("cost", 1.0)
+            rx_graph.add_edge(node_to_rx[u], node_to_rx[v], cost)
+
+        rx_paths = rx.all_pairs_dijkstra_shortest_paths(rx_graph, float)
+
+        # Reconversion of the Rust paths back to Eclypse node identifiers
         full_paths = {}
-
-        for source_id in range(num_nodes):
-            # Native array instead of indices for performance in Dijkstra's algorithm
-            distances = [float("inf")] * num_nodes
-            distances[source_id] = 0.0
-            predecessors = [-1] * num_nodes
-
-            pq = [(0.0, source_id)]
-
-            while pq:
-                current_dist, u_id = heapq.heappop(pq)
-
-                if current_dist > distances[u_id]:
-                    continue
-
-                for v_id, weight in adj[u_id]:
-                    distance = current_dist + weight
-
-                    if distance < distances[v_id]:
-                        distances[v_id] = distance
-                        predecessors[v_id] = u_id
-                        heapq.heappush(pq, (distance, v_id))
-
-            # Reconstruct the paths from the predecessors array
-            source = id_to_node[source_id]
+        for source_rx, targets in rx_paths.items():
+            source = rx_to_node[source_rx]
             source_paths = {}
-            for target_id in range(num_nodes):
-                if distances[target_id] == float("inf"):
-                    continue
-
-                path = []
-                curr = target_id
-                while curr != -1:
-                    path.append(id_to_node[curr])
-                    curr = predecessors[curr]
-                path.reverse()
-                source_paths[id_to_node[target_id]] = path
+            for target_rx, path_indices in targets.items():
+                # Translate the array of Rust indices back to Eclypse node identifiers
+                source_paths[rx_to_node[target_rx]] = [
+                    rx_to_node[i] for i in path_indices
+                ]
 
             full_paths[source] = source_paths
 
