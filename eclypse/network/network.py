@@ -7,7 +7,7 @@ from collections import (
 from dataclasses import dataclass
 
 import networkx as nx
-import rustworkx as rx
+import rustworkx as rx  # type: ignore
 
 from eclypse.graph import Infrastructure
 

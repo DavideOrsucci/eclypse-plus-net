@@ -2,7 +2,7 @@
 
 from eclypse.workflow.event import once_at
 
-from .network import Network
+from eclypse.network import Network
 
 
 @once_at(step=50, event_type="infrastructure", name="fault_injection")
