@@ -3,8 +3,8 @@
 from .network import HopInfo, Network, Packet
 from .network_application import NetworkApplication
 from .packet_generation import PacketGenerationEvent
-from .traffic_event import RoutingEvent
-from .traffic_metric import RoutingMetric
+from .routing_event import RoutingEvent
+from .routing_metric import RoutingMetric
 
 __all__ = [
     "HopInfo",
