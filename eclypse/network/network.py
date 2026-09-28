@@ -4,7 +4,6 @@ from collections import (
     defaultdict,
     deque,
 )
-from dataclasses import dataclass
 
 import msgspec  # type: ignore
 import networkx as nx
@@ -80,8 +79,7 @@ class Host(NetNode):
         super().__init__(name, **assets)
 
 
-@dataclass(slots=True)
-class HopInfo:
+class HopInfo(msgspec.Struct, gc=False):  # type: ignore[call-arg]
     """Represent detailed telemetry information for a single network hop.
 
     Attributes:
