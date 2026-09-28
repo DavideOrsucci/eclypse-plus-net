@@ -51,13 +51,37 @@ class RoutingEvent(EclypseEvent):
             placement: The placement strategy to resolve service to node mapping.
             infra (Network): The network infrastructure containing router buffers.
         """
+        # Cache for placement resolutions to avoid repeated lookups
+        placement_cache = {}
+
         for packet in app.generated_packets:
-            try:
-                src_node = placement.service_placement(service_id=packet.src)
-                dst_node = placement.service_placement(service_id=packet.dst)
-            except KeyError as e:
-                # If a service is not mapped, drop the packet locally
-                infra.logger.debug(f"Packet dropped locally: Unmapped service {e}")
+            # Resolution of the source
+            if packet.src not in placement_cache:
+                try:
+                    placement_cache[packet.src] = placement.service_placement(
+                        service_id=packet.src
+                    )
+                except KeyError as e:
+                    placement_cache[packet.src] = None
+                    infra.logger.debug(f"Packet dropped locally: Unmapped service {e}")
+
+            src_node = placement_cache[packet.src]
+            if src_node is None:
+                continue
+
+            # Resolution of the destination
+            if packet.dst not in placement_cache:
+                try:
+                    placement_cache[packet.dst] = placement.service_placement(
+                        service_id=packet.dst
+                    )
+                except KeyError as e:
+                    # If a service is not mapped, drop the packet locally
+                    infra.logger.debug(f"Packet dropped locally: Unmapped service {e}")
+                    placement_cache[packet.dst] = None
+
+            dst_node = placement_cache[packet.dst]
+            if dst_node is None:
                 continue
 
             if infra.nodes[src_node].get("role", "host") == "router":
