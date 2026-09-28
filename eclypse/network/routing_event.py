@@ -155,19 +155,27 @@ class RoutingEvent(EclypseEvent):
         """
         merged_queue = []
 
-        # Continue until there is at least one packet in any of the queues.
-        while any(incoming_queues.values()):
-            # Filter out sources that still have packages
-            active_sources = [src for src, q in incoming_queues.items() if len(q) > 0]
-            # Retrieve the associated weights (bandwidth)
-            active_weights = [bandwidths[src] for src in active_sources]
-            # Probabilistic extraction of the packet with P = Bandwidth/Sum(Bandwidths)
+        # Initialize the list of active sources and their corresponding weights
+        active_sources = [src for src, q in incoming_queues.items() if q]
+        active_weights = [bandwidths[src] for src in active_sources]
+
+        # Iterate until all queues are empty, selecting packets
+        # based on weighted probabilities
+        while active_sources:
+            # Extract a source based on the weighted probabilities
             chosen_source = random.choices(active_sources, weights=active_weights, k=1)[
                 0
             ]
-            # Remove packet from the chosen queue and insert it into the merged queue
-            packet = incoming_queues[chosen_source].popleft()
-            merged_queue.append(packet)
+            queue = incoming_queues[chosen_source]
+
+            merged_queue.append(queue.popleft())
+
+            # If the chosen source's queue is now empty, remove it from the active
+            # sources and weights
+            if not queue:
+                idx = active_sources.index(chosen_source)
+                active_sources.pop(idx)
+                active_weights.pop(idx)
 
         return merged_queue
 
