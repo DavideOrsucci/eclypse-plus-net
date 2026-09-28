@@ -6,6 +6,7 @@ from collections import (
 )
 from dataclasses import dataclass
 
+import msgspec  # type: ignore
 import networkx as nx
 import rustworkx as rx  # type: ignore
 
@@ -105,8 +106,7 @@ class HopInfo:
     dropped: bool = False
 
 
-@dataclass(slots=True)
-class Packet:
+class Packet(msgspec.Struct, gc=False):  # type: ignore[call-arg]
     """Represent a stateful network packet for hop-by-hop routing simulation.
 
     Attributes:
