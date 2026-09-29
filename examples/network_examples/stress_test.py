@@ -1,3 +1,13 @@
+"""
+This script is a stress test benchmark for the Eclypse+NET framework, designed to evaluate its scalability
+and throughput under varying network conditions. 
+It generates Fat-Tree topologies with different 'k' parameters, simulates network traffic with specified
+packet generation rates, and measures execution time and packet drops.
+The source host sends packets to multiple target hosts, and the simulation is run multiple times 
+to ensure statistical significance.
+"""
+
+
 import random
 import time
 
@@ -65,12 +75,12 @@ def run_eclypse_base_shared(base_infra: Infrastructure, steps: int = 10, run_idx
     return time.perf_counter() - start_time
 
 
-def run_eclypse_net_shared(base_infra: Infrastructure, rate_pps: int, pkt_size: int, steps: int = 10, run_idx: int = 0) -> dict:
+def run_eclypse_net_shared(base_infra: Infrastructure, total_pkt_per_step: int, pkt_size: int, steps: int = 10, run_idx: int = 0) -> dict:
     """Execute the Eclypse+NET simulation with specific traffic constraints."""
     num_nodes = len(base_infra.nodes)
-    k_param = base_infra.graph.get('k', 'unknown') # Try to extract k if saved in the graph
-    infra = Network(f"Net_Infra_{num_nodes}_{rate_pps}")
-    app = NetworkApplication(f"Net_App_{num_nodes}_{rate_pps}")
+    k_param = base_infra.graph.get('k', 'unknown') 
+    infra = Network(f"Net_Infra_{num_nodes}_{total_pkt_per_step}")
+    app = NetworkApplication(f"Net_App_{num_nodes}_{total_pkt_per_step}")
     mapping = {}
 
     for node in base_infra.nodes():
@@ -83,21 +93,31 @@ def run_eclypse_net_shared(base_infra: Infrastructure, rate_pps: int, pkt_size: 
             infra.add_router(node, processing_time=0.0001)
 
     for u, v in base_infra.edges():
-        infra.add_edge(u, v, bandwidth_mbps=1000, length_km=1, max_queue_size=100)
+        infra.add_edge(u, v, bandwidth_mbps=1000, length_km=1, max_queue_size=100000)
 
     available_hosts = list(infra.hosts)
 
-    # Calculate the number of packets per step (1 step = 1 ms)
-    # If rate_pps = 1500, pkt_per_step = 1.5
-    step_duration = 0.001
-    pkt_per_step = rate_pps * step_duration
-
-    if len(available_hosts) > 1:
+    # The first host is the source, and the rest are targets
+    # We will distribute the total packets per step evenly among the targets.
+    num_targets = len(available_hosts) - 1
+    
+    if num_targets > 0:
         source_app = f"App_{available_hosts[0]}"
+        
+        # Equal distribution of packets per step among targets
+        pkt_per_step_per_target = total_pkt_per_step / num_targets
+        
         for target_node in available_hosts[1:]:
             target_app = f"App_{target_node}"
-            app.add_edge(source_app, target_app, packet_size_bytes=pkt_size, avg_packets_per_step=pkt_per_step)
+            # The Poisson generator accepts fractional rates (float)
+            app.add_edge(
+                source_app, 
+                target_app, 
+                packet_size_bytes=pkt_size, 
+                avg_packets_per_step=pkt_per_step_per_target
+            )
 
+    step_duration = 1
     packet_evt = PacketGenerationEvent()
     routing_evt = RoutingEvent(step_duration_s=step_duration)
     metrics_evt = RoutingMetric()
@@ -126,62 +146,61 @@ def run_eclypse_net_shared(base_infra: Infrastructure, rate_pps: int, pkt_size: 
         'dropped': dropped
     }
 
+if __name__ == "__main__":
+    # Benchmark configuration
+    # k=4 (36 nodes), k=6 (99 nodes), k=8 (208 nodes), k=10 (375 nodes), k=12 (612 nodes)
+    k_values = [6, 8, 10, 12]
+    packets_per_step_rates = [10, 100, 300, 600, 900, 1200, 1500]
+    packet_size_bytes = 1500
+    num_runs = 1
+    sim_steps = 50
 
-# Benchmark configuration
-# k=4 (36 nodes), k=6 (99 nodes), k=8 (208 nodes), k=10 (375 nodes), k=12 (612 nodes)
-k_values = [6, 8, 10, 12]
-traffic_rates = [10, 100, 300, 600, 900, 1200, 1500]
-packet_size_bytes = 1500
-num_runs = 1
-sim_steps = 50
+    results = []
 
-results = []
+    print("Starting Stress Test Benchmark: Scalability & Throughput...")
+    for k in k_values:
+        total_nodes = int((5 * k**2) / 4 + (k**3) / 4) # Total nodes in a Fat-Tree topology
+        print(f"\n--- Testing Fat-Tree with k={k} ({total_nodes} nodes) ---")
 
-print("Starting Stress Test Benchmark: Scalability & Throughput...")
-for k in k_values:
-    total_nodes = int((5 * k**2) / 4 + (k**3) / 4) # Formula nodi Fat-Tree
-    print(f"\n--- Testing Fat-Tree with k={k} ({total_nodes} nodes) ---")
+        base_times = []
 
-    base_times = []
-
-    # Execution of the base Eclypse simulation to get a reference time (no traffic)
-    for run_idx in range(num_runs):
-        shared_topology = get_fat_tree(k=k, seed=GLOBAL_SEED + run_idx)
-        base_times.append(run_eclypse_base_shared(shared_topology.copy(), steps=sim_steps, run_idx=run_idx))
-
-    avg_base_time = np.mean(base_times)
-
-    # Execution of the Eclypse+NET simulation with different traffic rates
-    for rate in traffic_rates:
-        net_times = []
-        net_drops = []
-
+        # Execution of the base Eclypse simulation to get a reference time (no traffic)
         for run_idx in range(num_runs):
             shared_topology = get_fat_tree(k=k, seed=GLOBAL_SEED + run_idx)
+            base_times.append(run_eclypse_base_shared(shared_topology.copy(), steps=sim_steps, run_idx=run_idx))
 
-            net_metrics = run_eclypse_net_shared(
-                shared_topology.copy(),
-                rate_pps=rate,
-                pkt_size=packet_size_bytes,
-                steps=sim_steps,
-                run_idx=run_idx
-            )
+        avg_base_time = np.mean(base_times)
 
-            net_times.append(net_metrics['exec_time'])
-            net_drops.append(net_metrics['dropped'])
+        for rate in packets_per_step_rates:
+            net_times = []
+            net_drops = []
 
-        results.append({
-            'k_param': k,
-            'Total_Nodes': total_nodes,
-            'Packet_Rate (pkt/s)': rate,
-            'Packet_Size (Bytes)': packet_size_bytes,
-            'Eclypse Base Time (s)': round(avg_base_time, 4),
-            'Eclypse+NET Time (s)': round(np.mean(net_times), 4),
-            'Avg_Dropped_Packets': round(np.mean(net_drops), 2)
-        })
+            for run_idx in range(num_runs):
+                shared_topology = get_fat_tree(k=k, seed=GLOBAL_SEED + run_idx)
 
-        print(f"  Rate: {rate} pkt/s -> Exec: {np.mean(net_times):.3f}s | Drops: {np.mean(net_drops):.1f}")
+                net_metrics = run_eclypse_net_shared(
+                    shared_topology.copy(),
+                    total_pkt_per_step=rate,
+                    pkt_size=packet_size_bytes,
+                    steps=sim_steps,
+                    run_idx=run_idx
+                )
 
-df_results = pd.DataFrame(results)
+                net_times.append(net_metrics['exec_time'])
+                net_drops.append(net_metrics['dropped'])
 
-print(df_results)
+            results.append({
+                'k_param': k,
+                'Total_Nodes': total_nodes,
+                'Total_Pkt_per_Step': rate,
+                'Packet_Size (Bytes)': packet_size_bytes,
+                'Eclypse Base Time (s)': round(avg_base_time, 4),
+                'Eclypse+NET Time (s)': round(np.mean(net_times), 4),
+                'Avg_Dropped_Packets': round(np.mean(net_drops), 2)
+            })
+
+            print(f"  Rate: {rate} pkt/step -> Exec: {np.mean(net_times):.3f}s | Drops: {np.mean(net_drops):.1f}")
+
+    df_results = pd.DataFrame(results)
+
+    print(df_results)
