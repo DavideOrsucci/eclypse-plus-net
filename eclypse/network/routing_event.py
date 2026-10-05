@@ -1,10 +1,12 @@
 """Module containing the traffic routing execution event for the ECLYPSE framework."""
 
 import random
+from bisect import bisect_right
 from collections import (
     defaultdict,
     deque,
 )
+from itertools import accumulate
 
 from eclypse.workflow.event import EclypseEvent
 from eclypse.workflow.trigger import CascadeTrigger
@@ -43,7 +45,7 @@ class RoutingEvent(EclypseEvent):
 
         Reads the generated packets from the application layer, resolves their physical
         source and destination nodes using the placement strategy, and places them into
-        the router buffer of their source node.
+        the local injection buffer of their source node.
 
         Args:
             app (NetworkApplication): The application layer containing generated \
@@ -51,53 +53,62 @@ class RoutingEvent(EclypseEvent):
             placement: The placement strategy to resolve service to node mapping.
             infra (Network): The network infrastructure containing router buffers.
         """
-        # Cache for placement resolutions to avoid repeated lookups
-        placement_cache = {}
+        node_attrs = infra._node  # pylint: disable=protected-access
+        # service -> node, or None if unmapped
+        placement_cache: dict[str, str | None] = {}
+        # service -> injection buffer of its node, or None if it cannot send
+        source_cache: dict[str, list | None] = {}
+
+        def resolve(service: str) -> str | None:
+            try:
+                node = placement.service_placement(service_id=service)
+            except KeyError as e:
+                infra.logger.debug(f"Packet dropped locally: Unmapped service {e}")
+                node = None
+            placement_cache[service] = node
+            return node
 
         for packet in app.generated_packets:
-            # Resolution of the source
-            if packet.src not in placement_cache:
-                try:
-                    placement_cache[packet.src] = placement.service_placement(
-                        service_id=packet.src
-                    )
-                except KeyError as e:
-                    placement_cache[packet.src] = None
-                    infra.logger.debug(f"Packet dropped locally: Unmapped service {e}")
-
-            src_node = placement_cache[packet.src]
-            if src_node is None:
-                continue
-
-            # Resolution of the destination
-            if packet.dst not in placement_cache:
-                try:
-                    placement_cache[packet.dst] = placement.service_placement(
-                        service_id=packet.dst
-                    )
-                except KeyError as e:
-                    # If a service is not mapped, drop the packet locally
-                    infra.logger.debug(f"Packet dropped locally: Unmapped service {e}")
-                    placement_cache[packet.dst] = None
-
-            dst_node = placement_cache[packet.dst]
-            if dst_node is None:
-                continue
-
-            if infra.nodes[src_node].get("role", "host") == "router":
-                infra.logger.warning(
-                    f"Packet dropped: the service '{packet.src}' is located on node "
-                    f"'{src_node}' which is configured as a Router. "
-                    f"Only Host nodes can generate traffic!"
+            src_service = packet.src
+            if src_service in source_cache:
+                buffer = source_cache[src_service]
+                src_node = placement_cache[src_service]
+            else:
+                src_node = (
+                    placement_cache[src_service]
+                    if src_service in placement_cache
+                    else resolve(src_service)
                 )
+                buffer = None
+                if src_node is not None:
+                    attrs = node_attrs[src_node]
+                    if attrs.get("role", "host") == "router":
+                        infra.logger.warning(
+                            f"Packet dropped: the service '{src_service}' is located "
+                            f"on node '{src_node}' which is configured as a Router. "
+                            f"Only Host nodes can generate traffic!"
+                        )
+                    else:
+                        buffer = attrs["local_injections"]
+                source_cache[src_service] = buffer
+
+            if buffer is None:
+                continue
+
+            dst_service = packet.dst
+            dst_node = (
+                placement_cache[dst_service]
+                if dst_service in placement_cache
+                else resolve(dst_service)
+            )
+            if dst_node is None:
                 continue
 
             packet.src = src_node
             packet.dst = dst_node
             packet.current_node = src_node
-
             packet.previous_node = None
-            infra.nodes[src_node]["local_injections"].append(packet)
+            buffer.append(packet)
 
         app.generated_packets.clear()
 
@@ -106,10 +117,6 @@ class RoutingEvent(EclypseEvent):
     ) -> tuple[dict, dict]:
         """Separate incoming packets by source and determine link bandwidths.
 
-        Analyzes the current buffer of a router, groups packets based on their previous
-        hop,and retrieves the bandwidth capacity of each incoming link from the
-        infrastructure.
-
         Args:
             router (str): The identifier of the router being processed.
             buffer (list): The list of packets currently in the router's buffer.
@@ -117,20 +124,17 @@ class RoutingEvent(EclypseEvent):
 
         Returns:
             tuple[dict, dict]: A tuple containing two dictionaries:
-                - The first maps the previous node ID to a list of its packets.
+                - The first maps the previous node ID to a deque of its packets.
                 - The second maps the previous node ID to its link bandwidth in Mbps.
         """
         incoming_queues: dict[str, deque] = defaultdict(deque)
-
-        # Group packets by their previous node
         for pkt in buffer:
             incoming_queues[pkt.previous_node].append(pkt)
 
+        adj = infra._adj  # pylint: disable=protected-access
         bws: dict[str, float] = {}
         for prev_node in incoming_queues:
-            # Calculate the bandwidth for the link from the previous node
-            # to the current router
-            edge_data = infra.get_edge_data(prev_node, router, default={})
+            edge_data = adj.get(prev_node, {}).get(router, {})
             bws[prev_node] = edge_data.get("bandwidth_mbps", DEFAULT_BANDWIDTH_MBPS)
 
         return incoming_queues, bws
@@ -144,38 +148,46 @@ class RoutingEvent(EclypseEvent):
         input queues by tossing a 'weighted coin' based on the bandwidth values,
         simulating hardware fair-queuing based on link capacity.
 
+        The draw is exactly what ``random.choices(sources, weights, k=1)`` does
+        (cumulative weights + bisect on ``random() * total``), so the random stream
+        and the results are identical, but the cumulative weights are rebuilt only
+        when a queue empties instead of at every packet.
+
         Args:
-            incoming_queues (dict[str, list]): Dictionary of packets grouped by their \
-                source.
-            bandwidths (dict[str, float]): Dictionary of bandwidths for each source \
-                link.
+            incoming_queues (dict[str, deque]): Packets grouped by their source.
+            bandwidths (dict[str, float]): Bandwidth of each source link.
 
         Returns:
             list: A single, ordered list of interleaved packets ready for processing.
         """
-        merged_queue = []
-
-        # Initialize the list of active sources and their corresponding weights
+        rnd = random.random
         active_sources = [src for src, q in incoming_queues.items() if q]
+
+        if len(active_sources) == 1:
+            # Only one input: the order is fixed. One draw per packet is still
+            # consumed to keep the random stream identical to random.choices.
+            queue = incoming_queues[active_sources[0]]
+            for _ in range(len(queue)):
+                rnd()
+            return list(queue)
+
+        merged_queue = []
         active_weights = [bandwidths[src] for src in active_sources]
+        queues = [incoming_queues[src] for src in active_sources]
 
-        # Iterate until all queues are empty, selecting packets
-        # based on weighted probabilities
-        while active_sources:
-            # Extract a source based on the weighted probabilities
-            chosen_source = random.choices(active_sources, weights=active_weights, k=1)[
-                0
-            ]
-            queue = incoming_queues[chosen_source]
-
-            merged_queue.append(queue.popleft())
-
-            # If the chosen source's queue is now empty, remove it from the active
-            # sources and weights
-            if not queue:
-                idx = active_sources.index(chosen_source)
-                active_sources.pop(idx)
-                active_weights.pop(idx)
+        while queues:
+            cum_weights = list(accumulate(active_weights))
+            total = cum_weights[-1] + 0.0
+            hi = len(cum_weights) - 1
+            # Draw until one queue becomes empty, then rebuild the weights
+            while True:
+                idx = bisect_right(cum_weights, rnd() * total, 0, hi)
+                queue = queues[idx]
+                merged_queue.append(queue.popleft())
+                if not queue:
+                    queues.pop(idx)
+                    active_weights.pop(idx)
+                    break
 
         return merged_queue
 
@@ -188,10 +200,6 @@ class RoutingEvent(EclypseEvent):
     ) -> None:
         """Route packets sequentially and distribute them to their next destination.
 
-        Iterates over the multiplexed queue of packets, asking the infrastructure to
-        forward each one by a single hop. Packets that have not yet reached their
-        destination are placed in a temporary buffer for the next simulation step.
-
         Args:
             shuffled_packets (list): The probabilistically ordered list of packets.
             current_time_s (float): The current simulation time in seconds.
@@ -199,22 +207,14 @@ class RoutingEvent(EclypseEvent):
             next_step_buffers (dict): A dictionary to hold packets bound for other \
                 routers.
         """
+        forward = infra.forward_one_hop
         for pkt in shuffled_packets:
-            next_node = infra.forward_one_hop(pkt, current_time_s)
-
-            if next_node is not None:
-                if next_node == pkt.dst:
-                    pass  # The packet has reached its destination
-                else:
-                    next_step_buffers[next_node].append(pkt)
+            next_node = forward(pkt, current_time_s)
+            if next_node is not None and next_node != pkt.dst:
+                next_step_buffers[next_node].append(pkt)
 
     def __call__(self, app: NetworkApplication, placement, infra: Network, **_kwargs):
         """Execute the routing logic for packets generated in the current step.
-
-        Orchestrates the entire routing process for a single simulation step: injects
-        new traffic, processes buffers on all active routers using probabilistic
-        multiplexing, advances packets by one hop, and prepares the network state for
-        the following step.
 
         Args:
             app (NetworkApplication): The application layer with generated \
@@ -223,45 +223,44 @@ class RoutingEvent(EclypseEvent):
             infra (Network): The network infrastructure.
             **kwargs: Additional keyword arguments.
         """
-        infra.step_telemetry.clear()
+        infra.clear_step_telemetry()
         current_time_s = app.current_step * self.step_duration_s
+        node_attrs = infra._node  # pylint: disable=protected-access
 
         next_step_buffers: dict[str, list] = defaultdict(list)
 
-        # Put the generated packets into the router buffers of the hosts
+        # Put the generated packets into the injection buffers of the hosts
         self._inject_generated_packets(app, placement, infra)
 
         # Elaboration of the hosts
         for host in infra.hosts:
-            local_buffer = infra.nodes[host]["local_injections"]
-
+            local_buffer = node_attrs[host]["local_injections"]
             if not local_buffer:
                 continue
-
-            # Forward the shuffled packets to their next hop
             self._forward_shuffled_packets(
                 local_buffer, current_time_s, infra, next_step_buffers
             )
             local_buffer.clear()
 
         # Elaboration of the routers
+        logger = infra.logger.opt(lazy=True)
         for router in infra.routers:
-            buffer = infra.nodes[router]["router_buffer"]
-
+            buffer = node_attrs[router]["router_buffer"]
             if not buffer:
                 continue
 
-            # Prepare the incoming queues for the router with their bandwidths
             incoming_queues, bws = self._prepare_incoming_queues(router, buffer, infra)
-
-            # Shuffle the packets based on the probabilistic multiplexer logic
             shuffled_packets = self._build_probabilistic_queue(incoming_queues, bws)
 
             if len(shuffled_packets) > 1:
-                order_log = ", ".join(
-                    [f"{p.id} ({p.previous_node})" for p in shuffled_packets]
+                # Lazy: the string is built only if the INFO level is enabled
+                logger.info(  # noqa: PLE1205 (loguru {} formatting)
+                    "{} order: [{}]",
+                    lambda router=router: router,
+                    lambda pkts=shuffled_packets: ", ".join(
+                        f"{p.id} ({p.previous_node})" for p in pkts
+                    ),
                 )
-                infra.logger.info(f"{router} order: [{order_log}]")
 
             self._forward_shuffled_packets(
                 shuffled_packets, current_time_s, infra, next_step_buffers
@@ -270,7 +269,7 @@ class RoutingEvent(EclypseEvent):
 
         # Move the packets in transit to the next router buffers for the next step
         for node, pkts in next_step_buffers.items():
-            infra.nodes[node]["router_buffer"].extend(pkts)
+            node_attrs[node]["router_buffer"].extend(pkts)
 
         # Update the link latencies based on the telemetry of the current step
         infra.update_link_latencies()

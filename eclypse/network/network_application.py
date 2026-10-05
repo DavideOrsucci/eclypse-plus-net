@@ -96,20 +96,31 @@ class NetworkApplication(Application):
         """
         self.generated_packets.clear()
 
-        # Iterate over all edges (flows) defined in the application
-        for u, v, data in self.edges(data=True):
-            # Retrieve the saved parameters (Lambda parameter for Poisson)
-            lam_rate = data.get("avg_packets_per_step", DEFAULT_AVG_PACKETS_PER_STEP)
-            size = data.get("packet_size_bytes", DEFAULT_PACKET_SIZE_BYTES)
+        # Flow parameters are read live (update policies may change them)
+        flows = [
+            (
+                u,
+                v,
+                data.get("avg_packets_per_step", DEFAULT_AVG_PACKETS_PER_STEP),
+                data.get("packet_size_bytes", DEFAULT_PACKET_SIZE_BYTES),
+            )
+            for u, nbrs in self._adj.items()
+            for v, data in nbrs.items()
+        ]
+        if not flows:
+            return
 
-            # Number of packets to generate based on a Poisson distribution
-            n_packets = np.random.poisson(lam=lam_rate) if lam_rate > 0 else 0
+        # One vectorized Poisson draw for all the flows. With the legacy numpy
+        # generator this yields the same numbers as one scalar call per flow
+        # (lam == 0 returns 0 without consuming randomness).
+        counts = np.random.poisson([f[2] for f in flows]).tolist()
 
-            # Generate N actual packets for this step based on the Poisson draw
+        packets = self.generated_packets
+        counter = self._packet_counter
+        for (u, v, _, size), n_packets in zip(flows, counts, strict=True):
             for _ in range(n_packets):
-                self._packet_counter += 1
-
-                packet = Packet(
-                    id=self._packet_counter, src=u, dst=v, size=size, step_created=step
+                counter += 1
+                packets.append(
+                    Packet(id=counter, src=u, dst=v, size=size, step_created=step)
                 )
-                self.generated_packets.append(packet)
+        self._packet_counter = counter

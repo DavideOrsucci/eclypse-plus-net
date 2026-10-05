@@ -10,8 +10,8 @@ from .network_application import NetworkApplication
 class RoutingMetric:
     """Observer metric that extracts routing results using Structure of Arrays (SoA).
 
-    This approach avoids the massive overhead of dynamic string formatting
-    by appending object attributes to pre-allocated list columns.
+    The columns are filled directly during forwarding, so the metric only has to
+    add the ``step`` column.
     """
 
     def __call__(
@@ -29,38 +29,16 @@ class RoutingMetric:
             dict | None: A dictionary containing the SoA metrics for the current
                 step, or None if no packets were completed.
         """
-        if not infra.step_telemetry:
+        columns = infra.step_columns
+        n = len(columns["hop"])
+        if n == 0:
             return None
 
-        # Initialize the Structure of Arrays for the current step's metrics.
+        # The telemetry is already stored as a Structure of Arrays by
+        # Network.forward_one_hop: hand the column lists over without copying
+        # them (Network allocates fresh lists at the start of every step).
         step_results: dict[str, list[int | float | str | bool]] = {
-            "step": [],
-            "packet_id": [],
-            "hop_count": [],
-            "hop": [],
-            "processing_ms": [],
-            "queue_ms": [],
-            "transmission_ms": [],
-            "propagation_ms": [],
-            "queue_length": [],
-            "arrival_at_next": [],
-            "dropped": [],
+            "step": [app.current_step] * n
         }
-
-        current_step = app.current_step
-
-        # Iterate and append the observed packets and their hop information.
-        for packet, hop_info in infra.step_telemetry:
-            step_results["step"].append(current_step)
-            step_results["packet_id"].append(packet.id)
-            step_results["hop_count"].append(packet.hop_count)
-            step_results["hop"].append(hop_info.hop)
-            step_results["processing_ms"].append(float(hop_info.processing_ms))
-            step_results["queue_ms"].append(float(hop_info.queue_ms))
-            step_results["transmission_ms"].append(float(hop_info.transmission_ms))
-            step_results["propagation_ms"].append(float(hop_info.propagation_ms))
-            step_results["queue_length"].append(float(hop_info.queue_length))
-            step_results["arrival_at_next"].append(float(hop_info.arrival_at_next))
-            step_results["dropped"].append(bool(hop_info.dropped))
-
+        step_results.update(columns)
         return step_results
