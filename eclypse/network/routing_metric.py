@@ -35,7 +35,7 @@ class RoutingMetric:
             return None
 
         # The telemetry is already stored as a Structure of Arrays by
-        # Network.forward_one_hop: hand the column lists over without copying
+        # Network.forward_batch: hand the column lists over without copying
         # them (Network allocates fresh lists at the start of every step).
         step_results: dict[str, list[int | float | str | bool]] = {
             "step": [app.current_step] * n

@@ -8,7 +8,6 @@ from .constants import (
     DEFAULT_AVG_PACKETS_PER_STEP,
     DEFAULT_PACKET_SIZE_BYTES,
 )
-from .network import Packet
 
 
 class GeneratedTraffic:
@@ -64,27 +63,6 @@ class NetworkApplication(Application):
     def num_generated(self) -> int:
         """Return the number of packets generated in the current step."""
         return 0 if self.generated is None else len(self.generated)
-
-    @property
-    def generated_packets(self) -> list[Packet]:
-        """Return the packets of the current step as Packet objects.
-
-        Read-only convenience view, built on demand: the simulation works on the
-        arrays in ``generated``.
-        """
-        g = self.generated
-        if g is None:
-            return []
-        return [
-            Packet(
-                id=pid,
-                src=g.flows[f][0],
-                dst=g.flows[f][1],
-                size=g.flows[f][2],
-                step_created=g.step,
-            )
-            for f, pid in zip(g.flow.tolist(), g.id.tolist(), strict=True)
-        ]
 
     def add_edge(
         self,

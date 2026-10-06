@@ -5,7 +5,6 @@ from bisect import bisect_right
 from functools import reduce
 from operator import add
 
-import msgspec  # type: ignore
 import numpy as np
 import rustworkx as rx  # type: ignore
 
@@ -35,111 +34,6 @@ TELEMETRY_COLUMNS = (
     "dropped",
 )
 """Column names of the per-step hop telemetry (Structure of Arrays)."""
-
-
-class NetNode:
-    """Abstract base class representing a node in the network infrastructure."""
-
-    def __init__(self, name: str, **assets):
-        """Initialize a new network node.
-
-        Args:
-            name (str): The unique identifier of the node.
-            **assets: Arbitrary keyword arguments representing the node's resources and\
-            properties.
-        """
-        self.name = name
-        self.assets = assets
-
-
-class Router(NetNode):
-    """Network routing node.
-
-    Represents a node dedicated exclusively to routing network traffic.
-    It does not possess computational capabilities and cannot host application services.
-    """
-
-    def __init__(self, name: str, **assets):
-        """Initialize a new router node.
-
-        Args:
-            name (str): The unique identifier of the router.
-            **assets: Arbitrary keyword arguments for additional properties.
-        """
-        assets["role"] = "router"
-        # Reset computational resources to 0 to ensure standard placement always fails
-        assets["cpu"] = 0
-        assets["ram"] = 0
-        assets["disk"] = 0
-        super().__init__(name, **assets)
-
-
-class Host(NetNode):
-    """Computational network node.
-
-    Represents an end-host capable of hosting application services, executing
-    computational tasks, and generating network traffic.
-    """
-
-    def __init__(self, name: str, **assets):
-        """Initialize a new host node.
-
-        Args:
-            name (str): The unique identifier of the host.
-            **assets: Arbitrary keyword arguments representing computational assets\
-            and properties.
-        """
-        assets["role"] = "host"
-        super().__init__(name, **assets)
-
-
-class HopInfo(msgspec.Struct, gc=False):  # type: ignore[call-arg]
-    """Represent detailed telemetry information for a single network hop.
-
-    Attributes:
-        hop (str): The edge identifier representing the hop (e.g., 'A->B').
-        processing_ms (float): The processing delay in milliseconds.
-        queue_ms (float): The queuing delay in milliseconds.
-        transmission_ms (float): The transmission delay in milliseconds.
-        propagation_ms (float): The propagation delay in milliseconds.
-        queue_length (int): The number of packets in the queue at arrival time.
-        arrival_at_next (float): The absolute arrival time at the next node in ms.
-        dropped (bool): Indicates if the packet was dropped at this hop. \
-            Defaults to False.
-    """
-
-    hop: str
-    processing_ms: float
-    queue_ms: float
-    transmission_ms: float
-    propagation_ms: float
-    queue_length: int
-    arrival_at_next: float
-    dropped: bool = False
-
-
-class Packet(msgspec.Struct, gc=False):  # type: ignore[call-arg]
-    """Represent a stateful network packet for hop-by-hop routing simulation.
-
-    Attributes:
-        id (int): The unique identifier of the packet.
-        src (str): The source node identifier.
-        dst (str): The destination node identifier.
-        size (int): The size of the packet in bytes.
-        step_created (int): The simulation step when the packet was created.
-        current_node (str): The node where the packet is currently located.
-        previous_node (str): The node the packet just left.
-        hop_count (int): The number of hops the packet has traversed so far.
-    """
-
-    id: int
-    src: str
-    dst: str
-    size: int
-    step_created: int
-    current_node: str = ""
-    previous_node: str | None = None
-    hop_count: int = 0
 
 
 QUEUE_COMPACT_MIN = 1024
@@ -693,15 +587,6 @@ class Network(Infrastructure):
         if self._fwd is None:
             self.build_routing_tables()
 
-    def get_next_hop(self, source: str, target: str) -> str | None:
-        """Retrieve the next-hop from the FIB in O(1) time."""
-        self._ensure_tables()
-        s, t = self._node_ids.get(source), self._node_ids.get(target)
-        if s is None or t is None or not self._alive[s]:
-            return None
-        link = self._fwd[s, t]  # type: ignore[index]
-        return None if link < 0 else self._link_list[link].v
-
     # ------------------------------------------------------------------ roles
 
     @property
@@ -725,23 +610,33 @@ class Network(Infrastructure):
     def add_router(self, node_id: str, **attr):
         """Add a router to the network topology.
 
+        Routers only forward traffic: they cannot host services nor generate
+        packets.
+
         Args:
             node_id: The identifier of the router.
             **attr: Additional attributes for the router configuration.
         """
-        router = Router(name=node_id, **attr)
-        self.add_node(router.name, **router.assets)
+        attr["role"] = "router"
+        # Routers have no computational resources, so placement always fails
+        attr["cpu"] = 0
+        attr["ram"] = 0
+        attr["disk"] = 0
+        self.add_node(node_id, **attr)
         self.logger.debug(f"Added Router node: {node_id}")
 
     def add_host(self, node_id: str, **attr):
         """Add a computational host to the network topology.
 
+        Hosts can host services and generate traffic, but do not forward transit
+        packets.
+
         Args:
             node_id: The identifier of the host.
             **attr: Additional attributes for the host configuration.
         """
-        host = Host(name=node_id, **attr)
-        self.add_node(host.name, **host.assets)
+        attr["role"] = "host"
+        self.add_node(node_id, **attr)
         self.logger.debug(f"Added Host node: {node_id}")
 
     # ------------------------------------------------------------------ telemetry
@@ -759,27 +654,6 @@ class Network(Infrastructure):
             link.count = 0
         self._prev_touched = self._touched
         self._touched = []
-
-    @property
-    def step_telemetry(self) -> list[HopInfo]:
-        """Return the telemetry of the current step as HopInfo objects.
-
-        Convenience view built on demand; hot paths use ``step_columns``.
-        """
-        c = self.step_columns
-        return [
-            HopInfo(
-                hop=c["hop"][i],
-                processing_ms=c["processing_ms"][i],
-                queue_ms=c["queue_ms"][i],
-                transmission_ms=c["transmission_ms"][i],
-                propagation_ms=c["propagation_ms"][i],
-                queue_length=int(c["queue_length"][i]),
-                arrival_at_next=c["arrival_at_next"][i],
-                dropped=c["dropped"][i],
-            )
-            for i in range(len(c["hop"]))
-        ]
 
     def _default_latency(self, link: LinkState) -> float:
         """Estimate the latency of an idle link (1500 B packet, empty queue)."""
@@ -823,8 +697,8 @@ class Network(Infrastructure):
     def forward_batch(self, batch: PacketBatch, current_time: float) -> PacketBatch:
         """Forward every packet of the batch by one hop, in the batch order.
 
-        The result is the same as calling the per-packet store-and-forward logic
-        on each packet in order. Within a step a link is used only by the packets
+        The result is the same as applying the store-and-forward logic to one packet
+        at a time, in order. Within a step a link is used only by the packets
         of its source node, and the time is the same for all of them, so for each
         link the queue is served once and the i-th packet sees the queue of the
         previous ones: queue delays become cumulative sums and DropTail drops all
@@ -947,77 +821,3 @@ class Network(Infrastructure):
             (routers[int(rank[s])], transit.take(slice(s, e)))
             for s, e in zip(starts.tolist(), ends.tolist(), strict=True)
         ]
-
-    def forward_one_hop(self, packet: Packet, current_time: float) -> str | None:
-        """Forward a single packet by one hop (per-packet API).
-
-        Same model as :meth:`forward_batch`, for code that handles Packet objects
-        directly. The simulation events use the batched version.
-
-        Args:
-            packet (Packet): The packet object to be forwarded.
-            current_time (float): The absolute simulation time in seconds.
-
-        Returns:
-            str | None: The identifier of the next node, or None if no route exists
-                or if the packet is dropped due to queue congestion.
-        """
-        self._ensure_tables()
-        u = packet.current_node
-        s, t = self._node_ids.get(u), self._node_ids.get(packet.dst)
-        idx = -1 if s is None or t is None else int(self._fwd[s, t])  # type: ignore[index]
-        if idx < 0:
-            self.logger.warning(
-                f"Packet {packet.id} dropped: No routes for {packet.dst}"
-            )
-            return None
-        link = self._link_list[idx]
-        rate, d_proc, d_prop, max_q = link.link_params()
-        link.serve(current_time, rate)
-
-        cols = self.step_columns
-        if link.count == 0:
-            self._touched.append(link)
-        link.count += 1
-        queue_length = link.queue_length
-        now_ms = current_time * SEC_TO_MS
-
-        if queue_length >= max_q:
-            self.dropped_packets += 1
-            values = (0.0, 0.0, 0.0, 0.0, now_ms, packet.hop_count, True)
-            self.logger.debug(
-                f"Packet {packet.id} DROPPED at {u}: Queue full on link {link.hop} "
-                f"(Limit: {max_q})"
-            )
-            v = None
-        else:
-            size = packet.size
-            if rate > 0:
-                d_queue = link.queue_bytes * BYTES_TO_BITS / rate
-                d_transm = (size * BYTES_TO_BITS) / rate
-            else:
-                d_queue = d_transm = 0.0
-            last = link.cum[-1] if len(link.cum) > link.head else link.base
-            link.cum.append(last + size)
-            p_ms, q_ms = d_proc * SEC_TO_MS, d_queue * SEC_TO_MS
-            t_ms, pr_ms = d_transm * SEC_TO_MS, d_prop * SEC_TO_MS
-            link.delay_sum += p_ms + q_ms + t_ms + pr_ms
-            arrival = now_ms + (d_proc + d_queue + d_transm + d_prop) * SEC_TO_MS
-            v = link.v
-            packet.previous_node = u
-            packet.current_node = v
-            packet.hop_count += 1
-            values = (p_ms, q_ms, t_ms, pr_ms, arrival, packet.hop_count, False)
-
-        p_ms, q_ms, t_ms, pr_ms, arrival, hop_count, dropped = values
-        cols["packet_id"].append(packet.id)
-        cols["hop_count"].append(hop_count)
-        cols["hop"].append(link.hop)
-        cols["processing_ms"].append(p_ms)
-        cols["queue_ms"].append(q_ms)
-        cols["transmission_ms"].append(t_ms)
-        cols["propagation_ms"].append(pr_ms)
-        cols["queue_length"].append(float(queue_length))
-        cols["arrival_at_next"].append(arrival)
-        cols["dropped"].append(dropped)
-        return v
