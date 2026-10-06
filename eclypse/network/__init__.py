@@ -1,6 +1,6 @@
 """Physical network extension for the ECLYPSE framework."""
 
-from .network import HopInfo, Network, Packet
+from .network import HopInfo, Network, Packet, PacketBatch
 from .network_application import NetworkApplication
 from .packet_generation import PacketGenerationEvent
 from .routing_event import RoutingEvent
@@ -11,6 +11,7 @@ __all__ = [
     "Network",
     "NetworkApplication",
     "Packet",
+    "PacketBatch",
     "PacketGenerationEvent",
     "RoutingEvent",
     "RoutingMetric",

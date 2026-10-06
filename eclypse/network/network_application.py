@@ -11,6 +11,31 @@ from .constants import (
 from .network import Packet
 
 
+class GeneratedTraffic:
+    """Packets generated in one step, stored as arrays (one entry per packet).
+
+    Attributes:
+        flows (list[tuple[str, str, int]]): (source service, destination service,
+            packet size) of every flow, indexed by ``flow``.
+        flow (np.ndarray): The flow index of each packet, in generation order.
+        id (np.ndarray): The unique id of each packet.
+        step (int): The step in which the packets were created.
+    """
+
+    __slots__ = ("flow", "flows", "id", "step")
+
+    def __init__(self, flows, flow: np.ndarray, ids: np.ndarray, step: int):
+        """Initialize the generated traffic of a step."""
+        self.flows = flows
+        self.flow = flow
+        self.id = ids
+        self.step = step
+
+    def __len__(self) -> int:
+        """Return the number of generated packets."""
+        return len(self.id)
+
+
 class NetworkApplication(Application):
     """Extension of the standard ECLYPSE application class.
 
@@ -32,7 +57,34 @@ class NetworkApplication(Application):
         # Internal counter to give unique IDs to generated packets
         self._packet_counter = 0
         self.current_step = 0
-        self.generated_packets = []
+        # Packets generated in the current step (consumed by the RoutingEvent)
+        self.generated: GeneratedTraffic | None = None
+
+    @property
+    def num_generated(self) -> int:
+        """Return the number of packets generated in the current step."""
+        return 0 if self.generated is None else len(self.generated)
+
+    @property
+    def generated_packets(self) -> list[Packet]:
+        """Return the packets of the current step as Packet objects.
+
+        Read-only convenience view, built on demand: the simulation works on the
+        arrays in ``generated``.
+        """
+        g = self.generated
+        if g is None:
+            return []
+        return [
+            Packet(
+                id=pid,
+                src=g.flows[f][0],
+                dst=g.flows[f][1],
+                size=g.flows[f][2],
+                step_created=g.step,
+            )
+            for f, pid in zip(g.flow.tolist(), g.id.tolist(), strict=True)
+        ]
 
     def add_edge(
         self,
@@ -94,33 +146,33 @@ class NetworkApplication(Application):
         Args:
             step (int): The current simulation step number to stamp on packets.
         """
-        self.generated_packets.clear()
+        self.generated = None
 
         # Flow parameters are read live (update policies may change them)
-        flows = [
-            (
-                u,
-                v,
-                data.get("avg_packets_per_step", DEFAULT_AVG_PACKETS_PER_STEP),
-                data.get("packet_size_bytes", DEFAULT_PACKET_SIZE_BYTES),
-            )
-            for u, nbrs in self._adj.items()
-            for v, data in nbrs.items()
-        ]
+        flows = []
+        rates = []
+        for u, nbrs in self._adj.items():
+            for v, data in nbrs.items():
+                flows.append(
+                    (u, v, data.get("packet_size_bytes", DEFAULT_PACKET_SIZE_BYTES))
+                )
+                rates.append(
+                    data.get("avg_packets_per_step", DEFAULT_AVG_PACKETS_PER_STEP)
+                )
         if not flows:
             return
 
         # One vectorized Poisson draw for all the flows. With the legacy numpy
         # generator this yields the same numbers as one scalar call per flow
         # (lam == 0 returns 0 without consuming randomness).
-        counts = np.random.poisson([f[2] for f in flows]).tolist()
+        counts = np.random.poisson(rates)
+        total = int(counts.sum())
 
-        packets = self.generated_packets
-        counter = self._packet_counter
-        for (u, v, _, size), n_packets in zip(flows, counts, strict=True):
-            for _ in range(n_packets):
-                counter += 1
-                packets.append(
-                    Packet(id=counter, src=u, dst=v, size=size, step_created=step)
-                )
-        self._packet_counter = counter
+        # Packets are numbered in flow order, as one loop per flow would do
+        ids = np.arange(
+            self._packet_counter + 1, self._packet_counter + 1 + total, dtype=np.int64
+        )
+        self._packet_counter += total
+        self.generated = GeneratedTraffic(
+            flows, np.repeat(np.arange(len(flows)), counts), ids, step
+        )
