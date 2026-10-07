@@ -93,11 +93,10 @@ def _link(**attrs) -> LinkState:
     return LinkState("u", "v", attrs, {"processing_time": 0.002})
 
 
-def _enqueue(link: LinkState, sizes: list[int]):
-    last = link.cum[-1] if len(link.cum) > link.head else link.base
-    for size in sizes:
-        last += size
-        link.cum.append(last)
+def _schedule(link: LinkState, departures: list[float]):
+    """Queue packets that finish their transmission at the given times."""
+    link.departures.extend(departures)
+    link.busy_until = departures[-1]
 
 
 def test_new_link_is_idle_with_an_empty_queue():
@@ -105,86 +104,70 @@ def test_new_link_is_idle_with_an_empty_queue():
 
     assert link.hop == "u->v"
     assert link.queue_length == 0
-    assert link.queue_bytes == 0
+    assert link.busy_until == 0.0
+    assert link.backlog(1.0) == 0.0
     assert link.step_time == 0.0
-    assert (link.delay_sum, link.count) == (0.0, 0)
+    assert (link.delay_sum, link.count, link.dropped) == (0.0, 0, 0)
 
 
-def test_queue_length_and_bytes_follow_the_cumulative_list():
+def test_backlog_is_the_time_left_to_transmit_the_queue():
     link = _link()
+    _schedule(link, [1.0, 2.0, 3.0])
 
-    _enqueue(link, [100, 200, 300])
+    assert link.backlog(0.5) == pytest.approx(2.5)
+    assert link.backlog(3.0) == 0.0
+    assert link.backlog(10.0) == 0.0
 
-    assert link.queue_length == 3
-    assert link.queue_bytes == 600
 
-
-def test_serve_transmits_only_whole_packets_in_fifo_order():
+def test_serve_removes_the_packets_transmitted_by_the_current_time():
     link = _link()
-    _enqueue(link, [100, 200, 300])
+    _schedule(link, [1.0, 2.0, 3.0])
 
-    # 1 s at 2400 bit/s = 300 bytes: the first two packets fit exactly
-    link.serve(1.0, 2400.0)
+    link.serve(2.5)
 
     assert link.queue_length == 1
-    assert link.queue_bytes == 300
-    assert link.step_time == 1.0
+    assert link.step_time == 2.5
 
 
-def test_serve_with_enough_capacity_empties_the_queue():
+def test_a_packet_leaves_the_queue_exactly_at_its_departure_time():
     link = _link()
-    _enqueue(link, [100, 200, 300])
+    _schedule(link, [1.0, 2.0])
 
-    link.serve(10.0, 1e6)
+    link.serve(1.0)
+
+    assert link.queue_length == 1
+
+
+def test_serve_before_any_departure_keeps_the_queue():
+    link = _link()
+    _schedule(link, [1.0, 2.0])
+
+    link.serve(0.999)
+
+    assert link.queue_length == 2
+
+
+def test_serve_with_enough_time_empties_the_queue():
+    link = _link()
+    _schedule(link, [1.0, 2.0, 3.0])
+
+    link.serve(10.0)
 
     assert link.queue_length == 0
-    assert link.queue_bytes == 0
-
-
-def test_serve_keeps_a_packet_that_does_not_fit_entirely():
-    link = _link()
-    _enqueue(link, [1000])
-
-    link.serve(1.0, 7999.0)  # one bit short of a 1000-byte packet
-
-    assert link.queue_length == 1
-
-
-@pytest.mark.parametrize("time", [0.0, -1.0])
-def test_serve_does_nothing_if_time_does_not_advance(time):
-    link = _link()
-    _enqueue(link, [100])
-    link.step_time = 0.0
-
-    link.serve(time, 1e9)
-
-    assert link.queue_length == 1
 
 
 def test_serve_compacts_a_long_transmitted_prefix_preserving_the_queue():
     link = _link()
     n = 3 * QUEUE_COMPACT_MIN
-    _enqueue(link, [100] * n)
+    _schedule(link, [float(i) for i in range(1, n + 1)])
     drained = 2 * QUEUE_COMPACT_MIN
 
-    # 2 s at 400 * drained bit/s = 100 * drained bytes
-    link.serve(2.0, 400.0 * drained)
+    link.serve(float(drained))
 
     assert link.head == 0
-    assert len(link.cum) == n - drained
+    assert len(link.departures) == n - drained
     assert link.queue_length == n - drained
-    assert link.queue_bytes == 100 * (n - drained)
-
-
-def test_enqueue_after_compaction_continues_the_cumulative_count():
-    link = _link()
-    _enqueue(link, [100] * (3 * QUEUE_COMPACT_MIN))
-    link.serve(2.0, 1e12)  # drain everything
-
-    _enqueue(link, [50])
-
-    assert link.queue_length == 1
-    assert link.queue_bytes == 50
+    assert link.departures[0] == float(drained + 1)
 
 
 def test_link_params_read_the_edge_and_node_attributes():

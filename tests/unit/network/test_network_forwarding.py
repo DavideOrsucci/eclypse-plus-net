@@ -69,13 +69,26 @@ def test_transmission_delay_scales_with_packet_size(line_network):
 def test_backlog_from_a_previous_step_delays_new_packets(line_network):
     _forward(line_network, make_batch(line_network, "A", "B", 3), t=T0)
 
-    # 1.5 ms later one packet has been transmitted, two are still queued
+    # 1.5 ms later the first packet is gone and half of the second one has been
+    # transmitted: 1.5 ms of work are left
     _, cols = _forward(
         line_network, make_batch(line_network, "A", "B", 1, first_id=9), t=T0 + 0.0015
     )
 
     assert cols["queue_length"] == [2.0]
-    assert cols["queue_ms"] == pytest.approx([2 * TX_MS])
+    assert cols["queue_ms"] == pytest.approx([1.5 * TX_MS])
+
+
+def test_partial_transmissions_carry_over_between_steps(line_network):
+    _forward(line_network, make_batch(line_network, "A", "B", 2), t=T0)
+    link = line_network._links["A", "R"]
+
+    # Neither interval alone fits two packets, together they transmit both
+    link.serve(T0 + 0.0015)
+    assert link.queue_length == 1
+    link.serve(T0 + 0.0021)
+
+    assert link.queue_length == 0
 
 
 def test_queue_is_empty_after_enough_time(line_network):

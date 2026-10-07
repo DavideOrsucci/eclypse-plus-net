@@ -9,6 +9,7 @@ from tests.unit.network._helpers import (
     PROC_MS,
     PROP_MS,
     TX_MS,
+    build_line,
     make_batch,
 )
 
@@ -91,3 +92,37 @@ def test_clear_step_telemetry_resets_latency_accumulators(line_network):
     line_network.clear_step_telemetry()
 
     assert (link.delay_sum, link.count) == (0.0, 0)
+
+
+def test_dropped_packets_are_not_latency_samples():
+    net = build_line(max_queue_size=2)
+
+    _step(net, make_batch(net, "A", "B", 4))
+
+    # Average of the two accepted packets only: 2.5 ms and 3.5 ms
+    assert _latency(net, "A", "R") == pytest.approx(PROC_MS + TX_MS + PROP_MS + 0.5)
+
+
+def test_link_dropping_every_packet_reports_the_delay_behind_its_full_queue():
+    net = build_line(max_queue_size=2)
+    _step(net, make_batch(net, "A", "B", 2), t=1.0)
+
+    # Queue still full (2 ms of work, nothing transmitted yet): all dropped
+    _step(net, make_batch(net, "A", "B", 3, first_id=10), t=1.0)
+
+    assert net.dropped_packets == 3
+    assert _latency(net, "A", "R") == pytest.approx(IDLE_MS + 2 * TX_MS)
+
+
+def test_drop_counters_are_reset_at_every_step():
+    net = build_line(max_queue_size=1)
+    _step(net, make_batch(net, "A", "B", 3), t=1.0)
+    link = net._links["A", "R"]
+    assert (link.count, link.dropped) == (0, 0)
+
+    net.clear_step_telemetry()
+    net.forward_batch(make_batch(net, "A", "B", 3, first_id=10), 1.0)
+    assert (link.count, link.dropped) == (0, 3)
+    net.clear_step_telemetry()
+
+    assert (link.count, link.dropped) == (0, 0)

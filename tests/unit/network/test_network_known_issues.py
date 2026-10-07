@@ -11,47 +11,7 @@ from __future__ import annotations
 import pytest
 
 from eclypse.network import RoutingEvent
-from tests.unit.network._helpers import (
-    PROC_MS,
-    PROP_MS,
-    TX_MS,
-    build_line,
-    make_batch,
-)
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="LinkState.serve discards the capacity left after the last whole packet",
-)
-def test_partial_transmissions_carry_over_between_services():
-    net = build_line()
-    net.clear_step_telemetry()
-    net.forward_batch(make_batch(net, "A", "B", 2), 1.0)
-    link = net._links["A", "R"]
-
-    # Two 1 ms services: together they transmit exactly the two packets,
-    # but each one alone covers 1.5 packets at most
-    link.serve(1.0015, 8e6)
-    link.serve(1.002, 8e6)
-
-    assert link.queue_length == 0
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="Dropped packets are averaged into the link latency as 0 ms samples",
-)
-def test_dropped_packets_do_not_lower_the_link_latency():
-    net = build_line(max_queue_size=2)
-    net.clear_step_telemetry()
-
-    net.forward_batch(make_batch(net, "A", "B", 4), 1.0)
-    net.update_link_latencies()
-
-    # Average of the two accepted packets only: 2.5 ms and 3.5 ms
-    accepted = PROC_MS + TX_MS + PROP_MS
-    assert net.edges["A", "R"]["latency"] == pytest.approx(accepted + TX_MS / 2)
+from tests.unit.network._helpers import make_batch
 
 
 @pytest.mark.xfail(
