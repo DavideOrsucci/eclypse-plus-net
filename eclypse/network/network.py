@@ -166,12 +166,12 @@ class LinkState:
     attributes at every use, so that update policies acting on them take effect
     immediately.
 
-    The FIFO queue is represented by the cumulative number of bytes enqueued over
-    the lifetime of the link: ``cum[i]`` is the total number of bytes enqueued up to
-    and including the ``i``-th packet. Packets before ``head`` have already been
-    transmitted. This representation makes serving the queue a binary search and
-    enqueuing a batch of packets a single ``extend``, and keeps every byte count
-    exact.
+    The link is a FIFO server that transmits one packet at a time at its full
+    rate. Its queue is described by the time at which each packet finishes its
+    transmission (``departures``): a packet arriving at time ``a`` waits
+    ``max(0, busy_until - a)`` and then occupies the link for its transmission
+    time (Lindley recursion). Partially transmitted packets are therefore
+    accounted for exactly, whatever the times at which the queue is observed.
 
     Attributes:
         u (str): Source node of the link.
@@ -180,24 +180,28 @@ class LinkState:
         attrs (dict): Edge attribute dictionary of the link in the infrastructure.
         u_attrs (dict): Node attribute dictionary of the source node, used to read
             its processing time.
-        cum (list[int]): Cumulative bytes enqueued, one entry per packet that is
-            still queued or has been transmitted since the last compaction.
-        head (int): Index in ``cum`` of the first packet still waiting in the queue.
-        base (int): Cumulative bytes already transmitted.
+        departures (list[float]): Time, in seconds, at which each accepted packet
+            finishes its transmission, in FIFO order. Entries before ``head`` belong
+            to packets already transmitted.
+        head (int): Index in ``departures`` of the first packet not yet fully
+            transmitted at ``step_time``.
+        busy_until (float): Time, in seconds, at which the link finishes
+            transmitting all the accepted packets.
         step_time (float): Simulation time, in seconds, of the last service of the
             queue.
         delay_sum (float): Sum of the hop delays, in milliseconds, of the packets
             accepted on the link in the current step.
-        count (int): Number of packets, accepted or dropped, offered to the link in
-            the current step.
+        count (int): Number of packets accepted on the link in the current step.
+        dropped (int): Number of packets dropped by the link in the current step.
     """
 
     __slots__ = (
         "attrs",
-        "base",
+        "busy_until",
         "count",
-        "cum",
         "delay_sum",
+        "departures",
+        "dropped",
         "head",
         "hop",
         "step_time",
@@ -220,53 +224,47 @@ class LinkState:
         self.hop = f"{u}->{v}"
         self.attrs = attrs
         self.u_attrs = u_attrs
-        self.cum: list[int] = []
+        self.departures: list[float] = []
         self.head = 0
-        self.base = 0
+        self.busy_until = 0.0
         self.step_time = 0.0
         self.delay_sum = 0.0
         self.count = 0
+        self.dropped = 0
 
     @property
     def queue_length(self) -> int:
-        """Number of packets waiting in the queue."""
-        return len(self.cum) - self.head
+        """Number of packets not yet fully transmitted at the last service."""
+        return len(self.departures) - self.head
 
-    @property
-    def queue_bytes(self) -> int:
-        """Number of bytes waiting in the queue."""
-        return self.cum[-1] - self.base if len(self.cum) > self.head else 0
-
-    def serve(self, current_time: float, rate_bps: float):
-        """Transmit the packets that left the queue since the last service.
-
-        The link transmits ``(current_time - step_time) * rate_bps`` bits. Packets
-        leave the queue in FIFO order as long as the whole packet fits in this
-        capacity. Since byte counts are integers, the condition
-        ``8 * bytes <= capacity`` is evaluated exactly as
-        ``bytes <= floor(capacity / 8)``.
+    def backlog(self, current_time: float) -> float:
+        """Return the time needed to transmit the packets already accepted.
 
         Args:
             current_time (float): Current simulation time, in seconds.
-            rate_bps (float): Transmission rate of the link, in bits per second.
+
+        Returns:
+            float: The waiting time, in seconds, of a packet arriving at
+                ``current_time``.
         """
-        if current_time > self.step_time:
-            cum = self.cum
-            capacity = (current_time - self.step_time) * rate_bps
-            if len(cum) > self.head and capacity > 0:
-                limit = capacity / BYTES_TO_BITS
-                if limit >= cum[-1] - self.base:
-                    self.head = len(cum)
-                    self.base = cum[-1]
-                else:
-                    k = bisect_right(cum, self.base + math.floor(limit), self.head)
-                    if k > self.head:
-                        self.head = k
-                        self.base = cum[k - 1]
-                # Compact the list once the transmitted prefix dominates
-                if self.head > QUEUE_COMPACT_MIN and 2 * self.head > len(cum):
-                    del cum[: self.head]
-                    self.head = 0
+        return max(0.0, self.busy_until - current_time)
+
+    def serve(self, current_time: float):
+        """Remove from the queue the packets transmitted by ``current_time``.
+
+        A packet leaves the queue when its transmission ends, i.e. when its
+        departure time is not later than ``current_time``.
+
+        Args:
+            current_time (float): Current simulation time, in seconds.
+        """
+        departures = self.departures
+        if len(departures) > self.head and departures[self.head] <= current_time:
+            self.head = bisect_right(departures, current_time, self.head)
+            # Compact the list once the transmitted prefix dominates
+            if self.head > QUEUE_COMPACT_MIN and 2 * self.head > len(departures):
+                del departures[: self.head]
+                self.head = 0
         self.step_time = current_time
 
     def link_params(self) -> tuple[float, float, float, float]:
@@ -372,9 +370,8 @@ class _Segments:
     have one entry per segment; per-packet arrays follow the link-sorted order.
 
     Within a step, all the packets of a link are offered to it at the same time.
-    The queue is therefore served once per link, and the ``i``-th packet of a
-    segment finds in the queue the backlog left from previous steps plus the
-    packets that precede it in the segment.
+    The ``i``-th packet of a segment therefore waits for the backlog of the link
+    plus the transmission of the packets that precede it in the segment.
 
     Attributes:
         links (list[LinkState]): The link of each segment.
@@ -386,12 +383,12 @@ class _Segments:
         proc (np.ndarray): Processing time of the source node of each link, in
             seconds.
         prop (np.ndarray): Propagation delay of each link, in seconds.
-        len0 (np.ndarray): Packets waiting on each link after serving its queue.
-        bytes0 (np.ndarray): Bytes waiting on each link after serving its queue.
+        len0 (np.ndarray): Packets not yet fully transmitted on each link when the
+            segment arrives.
+        wait0 (np.ndarray): Backlog of each link when the segment arrives, in
+            seconds.
         allowed (np.ndarray): Number of packets of each segment accepted by the
             DropTail policy; the remaining ones are dropped.
-        last (np.ndarray): Cumulative bytes enqueued on each link before the
-            segment.
         csum (np.ndarray): Running total of ``sizes`` over the whole batch.
         before (np.ndarray): Value of ``csum`` just before the start of each
             segment.
@@ -416,9 +413,8 @@ class _Segments:
         self.proc = np.empty(n)
         self.prop = np.empty(n)
         self.len0 = np.empty(n, dtype=np.int64)
-        self.bytes0 = np.empty(n, dtype=np.int64)
+        self.wait0 = np.empty(n)
         self.allowed = np.empty(n, dtype=np.int64)
-        self.last = np.empty(n, dtype=np.int64)
         self.csum = np.cumsum(sizes)
         self.before = self.csum[starts] - sizes[starts]
 
@@ -432,7 +428,7 @@ class _Segments:
             zip(self.links, self.counts.tolist(), strict=True)
         ):
             rate, d_proc, d_prop, max_q = link.link_params()
-            link.serve(current_time, rate)
+            link.serve(current_time)
             len0 = link.queue_length
             # DropTail: packet i is accepted while len0 + i < max_q
             free = max_q - len0
@@ -441,15 +437,13 @@ class _Segments:
             self.proc[j] = d_proc
             self.prop[j] = d_prop
             self.len0[j] = len0
-            self.bytes0[j] = link.queue_bytes
-            self.last[j] = link.cum[-1] if len0 else link.base
+            self.wait0[j] = link.backlog(current_time)
 
     def hop_delays(self, current_time: float) -> dict[str, np.ndarray]:
         """Compute the delays and the outcome of every packet.
 
         Dropped packets get zero delays and an arrival time equal to the current
-        time. The arithmetic follows a fixed operation order, so the results are
-        reproducible bit for bit.
+        time.
 
         Args:
             current_time (float): Current simulation time, in seconds.
@@ -459,23 +453,25 @@ class _Segments:
                 ``accepted`` (whether the packet entered the queue), the delay
                 columns of :data:`TELEMETRY_COLUMNS` (``processing_ms``,
                 ``queue_ms``, ``transmission_ms``, ``propagation_ms``),
-                ``arrival_at_next``, ``queue_length``, and ``hop_delay`` (the sum of
-                the four delays, in milliseconds).
+                ``arrival_at_next``, ``queue_length``, ``hop_delay`` (the sum of
+                the four delays, in milliseconds) and ``departure`` (the time at
+                which the transmission of the packet ends, in seconds).
         """
         rep, sizes = self.rep, self.sizes
         pos = np.arange(len(sizes)) - self.starts[rep]
         allowed = self.allowed[rep]
         accepted = pos < allowed
-        queued_bytes = self.bytes0[rep] + (self.csum - sizes - self.before[rep])
+        bytes_ahead = self.csum - sizes - self.before[rep]
 
         rate = self.rate[rep]
         d_proc = self.proc[rep]
         d_prop = self.prop[rep]
-        d_queue = _safe_divide(queued_bytes * BYTES_TO_BITS, rate)
+        d_queue = self.wait0[rep] + _safe_divide(bytes_ahead * BYTES_TO_BITS, rate)
         d_transm = _safe_divide(sizes * BYTES_TO_BITS, rate)
 
         out = {
             "accepted": accepted,
+            "departure": current_time + d_queue + d_transm,
             "processing_ms": d_proc * SEC_TO_MS,
             "queue_ms": d_queue * SEC_TO_MS,
             "transmission_ms": d_transm * SEC_TO_MS,
@@ -500,11 +496,11 @@ class _Segments:
         )
         return out
 
-    def commit(self, hop_delay: np.ndarray, touched: list, network) -> int:
+    def commit(self, hops: dict[str, np.ndarray], touched: list, network) -> int:
         """Enqueue the accepted packets and record the latency samples of each link.
 
         Args:
-            hop_delay (np.ndarray): Total hop delay of each packet, in milliseconds.
+            hops (dict[str, np.ndarray]): The result of :meth:`hop_delays`.
             touched (list[LinkState]): Links that received traffic in the current
                 step; links used for the first time in the step are appended.
             network (Network): The network, used for logging.
@@ -512,9 +508,8 @@ class _Segments:
         Returns:
             int: The number of dropped packets.
         """
-        # Cumulative queue bytes of every packet (as if all were accepted)
-        cum_bytes = (self.csum - self.before[self.rep] + self.last[self.rep]).tolist()
-        delays = hop_delay.tolist()
+        departures = hops["departure"].tolist()
+        delays = hops["hop_delay"].tolist()
         n_dropped = 0
         for link, start, n, a in zip(
             self.links,
@@ -523,15 +518,17 @@ class _Segments:
             self.allowed.tolist(),
             strict=True,
         ):
+            if link.count == 0 and link.dropped == 0:
+                touched.append(link)
             if a:
                 end = start + a
-                link.cum.extend(cum_bytes[start:end])
+                link.departures.extend(departures[start:end])
+                link.busy_until = departures[end - 1]
                 # Left-to-right summation, for reproducible floating point results
                 link.delay_sum = reduce(add, delays[start:end], link.delay_sum)
-            if link.count == 0:
-                touched.append(link)
-            link.count += n  # A drop counts as a 0 ms sample in the link average
+                link.count += a
             if a < n:
+                link.dropped += n - a
                 n_dropped += n - a
                 network.logger.debug(
                     f"{n - a} packets DROPPED at {link.u}: Queue full on link "
@@ -907,16 +904,20 @@ class Network(Infrastructure):
         for link in self._touched:
             link.delay_sum = 0.0
             link.count = 0
+            link.dropped = 0
         self._prev_touched = self._touched
         self._touched = []
 
-    def _default_latency(self, link: LinkState) -> float:
-        """Estimate the latency of an idle link.
+    def _default_latency(self, link: LinkState, backlog_s: float = 0.0) -> float:
+        """Estimate the latency of a link from its parameters and backlog.
 
-        The estimate is the delay of a 1500-byte packet that finds the queue empty.
+        The estimate is the delay of a 1500-byte packet that waits ``backlog_s``
+        before being transmitted.
 
         Args:
             link (LinkState): The link.
+            backlog_s (float): The queuing delay, in seconds. Defaults to 0.0, which
+                gives the latency of an idle link.
 
         Returns:
             float: The estimated latency, in milliseconds.
@@ -928,17 +929,18 @@ class Network(Infrastructure):
         d_prop = (length / speed) * SEC_TO_MS if speed > 0 else 0.0
         R = data.get("bandwidth_mbps", DEFAULT_BANDWIDTH_MBPS) * MBPS_TO_BPS
         d_transm = ((1500 * BYTES_TO_BITS) / R) * SEC_TO_MS if R > 0 else 0.0
-        return d_proc + d_prop + d_transm
+        return d_proc + backlog_s * SEC_TO_MS + d_prop + d_transm
 
     def update_link_latencies(self):
         """Update the ``latency`` attribute of the links.
 
-        Links that carried traffic in the current step get the average delay of
-        their hops, where dropped packets count as zero-delay samples. Idle links
-        get the estimate of :meth:`_default_latency`. Since the estimate only
-        changes when a link becomes idle, only the links used in the current or in
-        the previous step are updated, except after a topology change, when all
-        the links are.
+        Links that accepted packets in the current step get the average delay of
+        those packets; dropped packets are not latency samples. Links that dropped
+        every packet offered to them get the delay that a new packet would
+        experience behind their full queue. Idle links get the estimate of
+        :meth:`_default_latency`. Since the estimate only changes when a link
+        becomes idle, only the links used in the current or in the previous step
+        are updated, except after a topology change, when all the links are.
         """
         self._ensure_tables()
 
@@ -946,17 +948,23 @@ class Network(Infrastructure):
             idle = self._links.values()
             self._latencies_initialized = True
         else:
-            idle = [link for link in self._prev_touched if link.count == 0]
+            idle = self._prev_touched
 
         for link in idle:
-            if link.count == 0:
+            if link.count == 0 and link.dropped == 0:
                 link.attrs["latency"] = self._default_latency(link)
 
         for link in self._touched:
-            link.attrs["latency"] = link.delay_sum / link.count
+            if link.count:
+                link.attrs["latency"] = link.delay_sum / link.count
+            else:
+                link.attrs["latency"] = self._default_latency(
+                    link, link.backlog(link.step_time)
+                )
             # Reset accumulators; the link stays in _touched until next clear
             link.delay_sum = 0.0
             link.count = 0
+            link.dropped = 0
 
     # ------------------------------------------------------------------ forwarding
 
@@ -1003,7 +1011,7 @@ class Network(Infrastructure):
         )
         seg.serve(current_time)
         hops = seg.hop_delays(current_time)
-        self.dropped_packets += seg.commit(hops["hop_delay"], self._touched, self)
+        self.dropped_packets += seg.commit(hops, self._touched, self)
 
         # Back to the processing order
         inv = np.empty(m, dtype=np.int64)
