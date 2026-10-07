@@ -1,4 +1,4 @@
-"""Module containing the traffic routing metric for the ECLYPSE framework."""
+"""Metric that reports the per-hop telemetry of the network traffic."""
 
 from eclypse.report.metrics.metric import application
 
@@ -8,35 +8,36 @@ from .network_application import NetworkApplication
 
 @application(name="traffic_routing", activates_on="step")
 class RoutingMetric:
-    """Observer metric that extracts routing results using Structure of Arrays (SoA).
+    """Application metric that reports the telemetry of every hop of the step.
 
-    The columns are filled directly during forwarding, so the metric only has to
-    add the ``step`` column.
+    The metric, named ``traffic_routing``, is collected at every step. It reports
+    one row per forwarded or dropped packet, with the columns listed in
+    :data:`~eclypse.network.network.TELEMETRY_COLUMNS` plus the ``step`` column.
     """
 
     def __call__(
         self, app: NetworkApplication, _placement, infra: Network, **_kwargs
     ) -> dict[str, list[int | float | str | bool]] | None:
-        """Extract and format metrics from the application's completed packets.
+        """Collect the telemetry of the current step.
 
         Args:
-            app (NetworkApplication): The application instance being observed.
-            placement: The placement service used in the simulation.
-            infra (Network): The network infrastructure model.
-            **kwargs: Additional keyword arguments provided by the framework.
+            app (NetworkApplication): The observed application.
+            _placement (Placement): The placement of the application (unused).
+            infra (Network): The network infrastructure.
+            **_kwargs: Additional arguments provided by the framework (unused).
 
         Returns:
-            dict | None: A dictionary containing the SoA metrics for the current
-                step, or None if no packets were completed.
+            dict[str, list[int | float | str | bool]] | None: One list per column,
+                with one entry per hop, or None if no packet was forwarded in the
+                step.
         """
         columns = infra.step_columns
         n = len(columns["hop"])
         if n == 0:
             return None
 
-        # The telemetry is already stored as a Structure of Arrays by
-        # Network.forward_batch: hand the column lists over without copying
-        # them (Network allocates fresh lists at the start of every step).
+        # The columns are returned without copying: the network allocates new
+        # lists at the start of every step.
         step_results: dict[str, list[int | float | str | bool]] = {
             "step": [app.current_step] * n
         }

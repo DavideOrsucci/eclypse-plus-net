@@ -1,4 +1,4 @@
-"""Module containing the packet generation event for the ECLYPSE framework."""
+"""Simulation event that generates the network traffic of each step."""
 
 from eclypse.workflow.event import EclypseEvent
 from eclypse.workflow.trigger import CascadeTrigger
@@ -8,18 +8,16 @@ from .network_application import NetworkApplication
 
 
 class PacketGenerationEvent(EclypseEvent):
-    """Worker event that generates network packets to be routed.
+    """Event that generates the packets of a :class:`NetworkApplication`.
 
-    This event triggers on every simulation step to instruct the application
-    to generate new traffic flows based on its internal graph and patterns.
+    The event runs at every simulation step. It advances the step counter of the
+    application and generates the packets of all its flows, which are then injected
+    into the network by the :class:`~eclypse.network.RoutingEvent`. It must
+    therefore be registered before the routing event.
     """
 
     def __init__(self):
-        """Initialize the packet generation event.
-
-        Sets up the event name, type, and triggers it to run on every
-        simulation step using a CascadeTrigger.
-        """
+        """Initialize the event, named ``packet_generation``, to run every step."""
         super().__init__(
             name="packet_generation",
             event_type="application",
@@ -27,21 +25,17 @@ class PacketGenerationEvent(EclypseEvent):
         )
 
     def __call__(self, app: NetworkApplication, _placement, _infra: Network, **_kwargs):
-        """Generate packets for the current simulation step.
-
-        Advances the internal application clock and triggers the creation of
-        new traffic flows based on the application's configured patterns.
+        """Advance the application to the next step and generate its packets.
 
         Args:
-            app (NetworkApplication): The application instance responsible for
-                generating the packets.
-            placement: The placement service used in the simulation.
-            infra (Network): The network infrastructure model.
-            **kwargs: Additional keyword arguments provided by the framework.
+            app (NetworkApplication): The application that generates the traffic.
+            _placement (Placement): The placement of the application (unused).
+            _infra (Network): The network infrastructure (unused).
+            **_kwargs: Additional arguments provided by the framework (unused).
 
         Returns:
-            dict: A dictionary containing the count of generated packets under
-                the key 'packets_generated'.
+            dict[str, int]: The number of generated packets, under the key
+                ``packets_generated``.
         """
         app.current_step += 1
         app.generate_traffic_for_step(app.current_step)
