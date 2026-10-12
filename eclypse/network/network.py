@@ -12,7 +12,7 @@ Every simulation step, all the packets to be forwarded are moved by one hop with
 single call to :meth:`Network.forward_batch`. Per-packet delays are computed with
 vectorized numpy operations, while Python objects are touched once per link.
 """
-
+from __future__ import annotations
 import math
 from bisect import bisect_right
 from functools import reduce
@@ -111,7 +111,7 @@ class PacketBatch:
             setattr(self, f, fields[f])
 
     @classmethod
-    def empty(cls) -> "PacketBatch":
+    def empty(cls) -> PacketBatch:
         """Create a batch that contains no packets.
 
         Returns:
@@ -123,7 +123,7 @@ class PacketBatch:
         """Return the number of packets in the batch."""
         return len(self.id)
 
-    def take(self, index: np.ndarray) -> "PacketBatch":
+    def take(self, index: np.ndarray) -> PacketBatch:
         """Select a subset of the packets.
 
         Args:
@@ -135,7 +135,7 @@ class PacketBatch:
         return PacketBatch(**{f: getattr(self, f)[index] for f in PACKET_FIELDS})
 
     @staticmethod
-    def concat(batches: list["PacketBatch"]) -> "PacketBatch":
+    def concat(batches: list[PacketBatch]) -> PacketBatch:
         """Concatenate several batches.
 
         Args:
