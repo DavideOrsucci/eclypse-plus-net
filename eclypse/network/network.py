@@ -13,7 +13,9 @@ by one hop with a single call to :meth:`Network.forward_batch`. Per-packet delay
 are computed with vectorized numpy operations, while Python objects are touched
 once per link.
 """
+
 from __future__ import annotations
+
 import math
 from bisect import bisect_right
 from functools import reduce
