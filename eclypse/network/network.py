@@ -8,9 +8,10 @@ with the data structures used to forward packets in batches:
 - :class:`LinkState` holds the runtime state (queue, timers, latency samples) of a
   directed link.
 
-Every simulation step, all the packets to be forwarded are moved by one hop with a
-single call to :meth:`Network.forward_batch`. Per-packet delays are computed with
-vectorized numpy operations, while Python objects are touched once per link.
+Every simulation step, the packets that have reached their current node are moved
+by one hop with a single call to :meth:`Network.forward_batch`. Per-packet delays
+are computed with vectorized numpy operations, while Python objects are touched
+once per link.
 """
 from __future__ import annotations
 import math
@@ -65,17 +66,29 @@ Each forwarded or dropped packet contributes one row:
 QUEUE_COMPACT_MIN = 1024
 """Minimum number of transmitted entries before a link queue list is compacted."""
 
-PACKET_FIELDS = ("id", "src", "dst", "size", "step", "cur", "prev", "hop")
+PACKET_FIELDS = ("id", "src", "dst", "size", "step", "cur", "prev", "hop", "arrival")
 """Names of the fields of a :class:`PacketBatch`."""
+
+PACKET_DTYPES = {**dict.fromkeys(PACKET_FIELDS, np.int64), "arrival": np.float64}
+"""Numpy data type of each field of a :class:`PacketBatch`."""
+
+ARRIVAL_TOLERANCE_S = 1e-9
+"""Tolerance, in seconds, of the comparison between arrival and current times.
+
+A packet whose arrival time exceeds the current time by less than this amount is
+considered arrived, so that floating point rounding in the sum of the hop delays
+does not delay it by a whole step.
+"""
 
 
 class PacketBatch:
     """A set of packets stored as a Structure of Arrays.
 
-    Each field is a one-dimensional ``int64`` numpy array, and position ``i`` of
-    every array describes the same packet. Node references are integer indices
-    assigned by :meth:`Network.node_index`. The order of the packets is meaningful:
-    it is the order in which they are processed.
+    Each field is a one-dimensional numpy array, of the type given in
+    :data:`PACKET_DTYPES`, and position ``i`` of every array describes the same
+    packet. Node references are integer indices assigned by
+    :meth:`Network.node_index`. The order of the packets is meaningful: it is the
+    order in which they are processed.
 
     Attributes:
         id (np.ndarray): Unique identifier of each packet.
@@ -87,6 +100,10 @@ class PacketBatch:
         prev (np.ndarray): Index of the node the packet came from, or ``-1`` if it
             has just been injected by its source.
         hop (np.ndarray): Number of hops traversed so far.
+        arrival (np.ndarray): Time, in seconds, at which the packet reaches the node
+            ``cur``: its generation time for a packet just injected by its source,
+            and the arrival time at the end of the last hop otherwise. A packet is
+            forwarded only once the current time has reached its arrival time.
     """
 
     __slots__ = PACKET_FIELDS
@@ -99,6 +116,7 @@ class PacketBatch:
     cur: np.ndarray
     prev: np.ndarray
     hop: np.ndarray
+    arrival: np.ndarray
 
     def __init__(self, **fields: np.ndarray):
         """Create a batch from its field arrays.
@@ -117,7 +135,7 @@ class PacketBatch:
         Returns:
             PacketBatch: An empty batch.
         """
-        return cls(**{f: np.empty(0, dtype=np.int64) for f in PACKET_FIELDS})
+        return cls(**{f: np.empty(0, dtype=PACKET_DTYPES[f]) for f in PACKET_FIELDS})
 
     def __len__(self) -> int:
         """Return the number of packets in the batch."""
@@ -454,8 +472,9 @@ class _Segments:
                 columns of :data:`TELEMETRY_COLUMNS` (``processing_ms``,
                 ``queue_ms``, ``transmission_ms``, ``propagation_ms``),
                 ``arrival_at_next``, ``queue_length``, ``hop_delay`` (the sum of
-                the four delays, in milliseconds) and ``departure`` (the time at
-                which the transmission of the packet ends, in seconds).
+                the four delays, in milliseconds), ``departure`` (the time at
+                which the transmission of the packet ends, in seconds) and
+                ``arrival`` (the arrival time at the next node, in seconds).
         """
         rep, sizes = self.rep, self.sizes
         pos = np.arange(len(sizes)) - self.starts[rep]
@@ -472,6 +491,7 @@ class _Segments:
         out = {
             "accepted": accepted,
             "departure": current_time + d_queue + d_transm,
+            "arrival": current_time + d_proc + d_queue + d_transm + d_prop,
             "processing_ms": d_proc * SEC_TO_MS,
             "queue_ms": d_queue * SEC_TO_MS,
             "transmission_ms": d_transm * SEC_TO_MS,
@@ -488,6 +508,7 @@ class _Segments:
                 out[name][dropped] = 0.0
             out["propagation_ms"][dropped] = 0.0
             out["arrival_at_next"][dropped] = current_time * SEC_TO_MS
+            out["arrival"][dropped] = current_time
         out["hop_delay"] = (
             out["processing_ms"]
             + out["queue_ms"]
@@ -550,14 +571,17 @@ class Network(Infrastructure):
     the bandwidth (as in OSPF). The forwarding tables are computed when first
     needed and rebuilt after every topology change.
 
-    At every step, :meth:`forward_batch` moves all the packets to be forwarded by
-    one hop. Per-hop telemetry is collected in :attr:`step_columns`, and the
-    ``latency`` attribute of each edge is updated with the average delay observed
-    on the link.
+    At every step, :meth:`forward_batch` moves by one hop the packets injected by
+    the hosts and the packets that have reached a router, i.e. whose arrival time
+    is not later than the current time. The other packets stay in transit until
+    they reach their router. Per-hop telemetry is collected in
+    :attr:`step_columns`, and the ``latency`` attribute of each edge is updated with
+    the average delay observed on the link.
 
     Attributes:
-        in_transit (PacketBatch): Packets waiting in the router buffers, to be
-            forwarded at the next step, in arrival order.
+        in_transit (PacketBatch): Packets travelling towards a router or waiting in
+            its buffer, in forwarding order. Each packet is forwarded in the first
+            step whose time is not earlier than its arrival time.
         step_columns (dict[str, list]): Telemetry of the current step, with one list
             per name in :data:`TELEMETRY_COLUMNS` and one row per hop.
         dropped_packets (int): Total number of packets dropped because a link queue
@@ -982,8 +1006,9 @@ class Network(Infrastructure):
         - the propagation delay of the link.
 
         One telemetry row per packet is appended to :attr:`step_columns`. Accepted
-        packets advance to the next node: those that reach their destination are
-        returned, the others are appended to :attr:`in_transit`.
+        packets advance to the next node and take its arrival time: those that
+        reach their destination are returned, the others are appended to
+        :attr:`in_transit`.
 
         Args:
             batch (PacketBatch): The packets to forward, in processing order.
@@ -1039,6 +1064,7 @@ class Network(Infrastructure):
         moved.prev = moved.cur
         moved.cur = self._link_v[link_of[acc]]
         moved.hop = new_hop[acc]
+        moved.arrival = hops["arrival"][inv][acc]
         delivered = moved.cur == moved.dst
         self.in_transit = PacketBatch.concat([self.in_transit, moved.take(~delivered)])
         return moved.take(delivered)
@@ -1072,20 +1098,35 @@ class Network(Infrastructure):
             link_of = link_of[~no_route]
         return batch, link_of
 
-    def take_router_batches(self) -> list[tuple[str, PacketBatch]]:
-        """Remove the packets in transit and group them by router.
+    def take_router_batches(
+        self, current_time: float | None = None
+    ) -> list[tuple[str, PacketBatch]]:
+        """Remove the packets that have arrived and group them by router.
 
-        Packets located on a host are discarded and counted in
-        :attr:`stranded_packets`, since hosts do not forward transit traffic.
+        A packet has arrived if its arrival time is not later than ``current_time``,
+        up to :data:`ARRIVAL_TOLERANCE_S`; the other packets stay in
+        :attr:`in_transit`. Arrived packets located on a host are discarded and
+        counted in :attr:`stranded_packets`, since hosts do not forward transit
+        traffic.
+
+        Args:
+            current_time (float | None): Current simulation time, in seconds. If
+                None, every packet in transit is considered arrived. Defaults to
+                None.
 
         Returns:
             list[tuple[str, PacketBatch]]: One ``(router, packets)`` pair per router
-                with waiting packets, in :attr:`routers` order. The packets of each
-                router are in arrival order.
+                with arrived packets, in :attr:`routers` order. The packets of each
+                router are in forwarding order.
         """
         self._ensure_tables()
         transit = self.in_transit
-        self.in_transit = PacketBatch.empty()
+        if current_time is None:
+            self.in_transit = PacketBatch.empty()
+        else:
+            arrived = transit.arrival <= current_time + ARRIVAL_TOLERANCE_S
+            self.in_transit = transit.take(~arrived)
+            transit = transit.take(arrived)
         if not len(transit):
             return []
         transit = transit.take(self._alive[transit.cur])

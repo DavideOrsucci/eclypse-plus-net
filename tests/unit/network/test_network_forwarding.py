@@ -167,6 +167,13 @@ def test_accepted_packets_advance_and_wait_in_transit(line_network):
     assert cols["hop_count"] == [1, 1]
 
 
+def test_packets_in_transit_take_their_arrival_time_at_the_next_node(line_network):
+    _, cols = _forward(line_network, make_batch(line_network, "A", "B", 3))
+
+    arrival_ms = line_network.in_transit.arrival * 1000.0
+    assert arrival_ms.tolist() == pytest.approx(cols["arrival_at_next"])
+
+
 def test_packets_reaching_their_destination_are_returned(line_network):
     batch = make_batch(line_network, "A", "B", 2, cur="R", prev="A", hop=1)
 
@@ -274,6 +281,64 @@ def test_take_router_batches_discards_packets_stranded_on_hosts(line_network):
 
     assert [(router, batch.id.tolist()) for router, batch in groups] == [("R", [1])]
     assert line_network.stranded_packets == 2
+
+
+def test_take_router_batches_keeps_the_packets_that_have_not_arrived(line_network):
+    line_network.in_transit = PacketBatch.concat(
+        [
+            make_batch(
+                line_network, "A", "B", 1, cur="R", prev="A", first_id=1, arrival=0.001
+            ),
+            make_batch(
+                line_network, "A", "B", 1, cur="R", prev="A", first_id=2, arrival=0.003
+            ),
+            make_batch(
+                line_network, "A", "B", 1, cur="R", prev="A", first_id=3, arrival=0.002
+            ),
+        ]
+    )
+
+    first = line_network.take_router_batches(0.002)
+
+    assert [(router, batch.id.tolist()) for router, batch in first] == [("R", [1, 3])]
+    assert line_network.in_transit.id.tolist() == [2]
+
+    second = line_network.take_router_batches(0.003)
+
+    assert [(router, batch.id.tolist()) for router, batch in second] == [("R", [2])]
+    assert len(line_network.in_transit) == 0
+
+
+def test_take_router_batches_tolerates_rounding_of_arrival_times(line_network):
+    # 0.1 + 0.2 is 0.30000000000000004 in floating point
+    line_network.in_transit = make_batch(
+        line_network, "A", "B", 1, cur="R", prev="A", arrival=0.1 + 0.2
+    )
+
+    [(router, batch)] = line_network.take_router_batches(0.3)
+
+    assert (router, batch.id.tolist()) == ("R", [1])
+
+
+def test_take_router_batches_without_a_time_takes_every_packet(line_network):
+    line_network.in_transit = make_batch(
+        line_network, "A", "B", 2, cur="R", prev="A", arrival=1e9
+    )
+
+    [(router, batch)] = line_network.take_router_batches()
+
+    assert (router, batch.id.tolist()) == ("R", [1, 2])
+    assert len(line_network.in_transit) == 0
+
+
+def test_packets_not_arrived_are_not_counted_as_stranded(line_network):
+    line_network.in_transit = make_batch(
+        line_network, "B", "A", 2, cur="B", prev="R", arrival=0.5
+    )
+
+    assert line_network.take_router_batches(0.1) == []
+    assert line_network.stranded_packets == 0
+    assert len(line_network.in_transit) == 2
 
 
 def test_take_router_batches_without_packets(line_network):

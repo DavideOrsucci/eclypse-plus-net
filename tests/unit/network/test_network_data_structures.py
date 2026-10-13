@@ -13,6 +13,7 @@ from eclypse.network.constants import (
     MBPS_TO_BPS,
 )
 from eclypse.network.network import (
+    PACKET_DTYPES,
     PACKET_FIELDS,
     QUEUE_COMPACT_MIN,
     LinkState,
@@ -27,14 +28,19 @@ def _batch(ids: list[int]) -> PacketBatch:
 # ---------------------------------------------------------------- PacketBatch
 
 
-def test_empty_batch_has_every_field_as_empty_int64_array():
+def test_empty_batch_has_every_field_as_an_empty_array_of_its_type():
     batch = PacketBatch.empty()
 
     assert len(batch) == 0
     for field in PACKET_FIELDS:
         values = getattr(batch, field)
-        assert values.dtype == np.int64
+        assert values.dtype == PACKET_DTYPES[field]
         assert values.shape == (0,)
+
+
+def test_arrival_times_are_floating_point_and_the_other_fields_integers():
+    assert PACKET_DTYPES["arrival"] == np.float64
+    assert {PACKET_DTYPES[f] for f in PACKET_FIELDS if f != "arrival"} == {np.int64}
 
 
 def test_len_counts_packets():

@@ -22,6 +22,7 @@ from tests.unit.network._helpers import (
     PROP_MS,
     TX_MS,
     StubPlacement,
+    make_batch,
 )
 
 
@@ -50,7 +51,8 @@ def test_first_step_injects_the_packets_on_the_source_host(line_network, line_ap
 @pytest.mark.usefixtures("seeded")
 def test_packets_advance_one_hop_per_step_and_are_delivered(line_network, line_app):
     app, placement = line_app
-    routing = RoutingEvent(step_duration_s=0.001)
+    # A step much longer than a hop: every packet reaches R within the step
+    routing = RoutingEvent(step_duration_s=0.1)
 
     first = list(_run_step(app, placement, line_network, routing)["packet_id"])
     cols = _run_step(app, placement, line_network, routing)
@@ -75,6 +77,59 @@ def test_forwarding_time_is_the_step_number_times_the_step_duration(
 
     first_arrival = cols["arrival_at_next"][0]
     assert first_arrival == pytest.approx(250.0 + PROC_MS + TX_MS + PROP_MS)
+
+
+@pytest.mark.usefixtures("seeded")
+def test_generated_packets_are_injected_at_the_time_of_the_step(line_network, line_app):
+    app, placement = line_app
+    line_network.build_routing_tables()
+    PacketGenerationEvent()(app, placement, line_network)
+
+    batch = RoutingEvent()._inject_generated_packets(app, placement, line_network, 0.25)
+
+    assert len(batch) > 0
+    assert batch.arrival.tolist() == [0.25] * len(batch)
+
+
+class _NoTrafficApp:
+    """Application stand-in without new packets, at a given step."""
+
+    generated = None
+
+    def __init__(self, step: int):
+        self.current_step = step
+
+
+def test_a_packet_is_not_forwarded_before_it_arrives(line_network):
+    routing = RoutingEvent(step_duration_s=0.001)
+    line_network.clear_step_telemetry()
+    # 50 packets on a link that needs 1 ms per packet: the last one reaches R
+    # after about 52 ms
+    line_network.forward_batch(make_batch(line_network, "A", "B", 50), 0.001)
+    last_arrival_ms = line_network.step_columns["arrival_at_next"][-1]
+    assert last_arrival_ms > 50.0
+
+    routing(_NoTrafficApp(2), None, line_network)  # step 2: t = 2 ms
+
+    assert 50 not in line_network.step_columns["packet_id"]
+    assert 50 in line_network.in_transit.id.tolist()
+
+
+def test_a_packet_is_forwarded_in_the_first_step_after_its_arrival(line_network):
+    routing = RoutingEvent(step_duration_s=0.001)
+    line_network.clear_step_telemetry()
+    # Sent at t = 1 ms: it reaches R at 1 + 0.5 + 1 + 1 = 3.5 ms
+    line_network.forward_batch(make_batch(line_network, "A", "B", 1), 0.001)
+    assert line_network.in_transit.arrival.tolist() == [pytest.approx(0.0035)]
+
+    forwarded_at = []
+    for step in range(2, 7):
+        routing(_NoTrafficApp(step), None, line_network)
+        if line_network.step_columns["hop"] == ["R->B"]:
+            forwarded_at.append(step)
+
+    assert forwarded_at == [4]  # t = 4 ms, the first step after 3.5 ms
+    assert len(line_network.in_transit) == 0
 
 
 @pytest.mark.usefixtures("seeded")
@@ -163,6 +218,7 @@ def _buffer(infra: Network, prev_hosts: list[str]) -> PacketBatch:
         cur=np.full(n, infra.node_index("R"), dtype=np.int64),
         prev=np.array([infra.node_index(h) for h in prev_hosts], dtype=np.int64),
         hop=np.ones(n, dtype=np.int64),
+        arrival=np.zeros(n, dtype=np.float64),
     )
 
 

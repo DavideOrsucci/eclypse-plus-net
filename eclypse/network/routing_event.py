@@ -17,18 +17,23 @@ from .network_application import NetworkApplication
 
 
 class RoutingEvent(EclypseEvent):
-    """Event that forwards the packets of the current step by one hop.
+    """Event that forwards by one hop the packets that can move in the current step.
 
     The event, named ``traffic_routing_execution``, runs at every step after the
     :class:`~eclypse.network.PacketGenerationEvent`. It:
 
     1. injects the packets generated in the step on the hosts where their source
        services are placed;
-    2. merges the packets waiting on each router, received on different input
-       links, with a probabilistic multiplexer weighted by the link bandwidths;
-    3. forwards all the packets by one hop with
+    2. takes the packets that have reached a router by the current time, and
+       merges the packets of each router, received on different input links, with
+       a probabilistic multiplexer weighted by the link bandwidths;
+    3. forwards these packets by one hop with
        :meth:`~eclypse.network.Network.forward_batch`;
     4. updates the ``latency`` attribute of the links.
+
+    A packet moves by at most one hop per step, and only once the current time has
+    reached its arrival time at its node. If the step is shorter than the delay of a
+    hop, the packet stays in transit for several steps.
 
     Packets are processed host by host, in :attr:`Network.hosts` order, and then
     router by router, in :attr:`Network.routers` order. The processing order
@@ -36,7 +41,9 @@ class RoutingEvent(EclypseEvent):
 
     Attributes:
         step_duration_s (float): The simulated duration of a step, in seconds. The
-            current time is the step number multiplied by this duration.
+            current time is the step number multiplied by this duration. Packets
+            are forwarded at the start of the first step that follows their
+            arrival, so a shorter step gives a finer time resolution.
     """
 
     def __init__(self, step_duration_s=0.001):
@@ -54,7 +61,7 @@ class RoutingEvent(EclypseEvent):
         )
 
     def _inject_generated_packets(
-        self, app: NetworkApplication, placement, infra: Network
+        self, app: NetworkApplication, placement, infra: Network, current_time: float
     ) -> PacketBatch:
         """Inject the packets generated in the step into the network.
 
@@ -68,6 +75,8 @@ class RoutingEvent(EclypseEvent):
             app (NetworkApplication): The application that generated the packets.
             placement (Placement): The placement of the application services.
             infra (Network): The network infrastructure.
+            current_time (float): Current simulation time, in seconds, used as the
+                arrival time of the packets on their source host.
 
         Returns:
             PacketBatch: The injected packets, in processing order.
@@ -134,6 +143,7 @@ class RoutingEvent(EclypseEvent):
             cur=src,
             prev=np.full(n, -1, dtype=np.int64),
             hop=np.zeros(n, dtype=np.int64),
+            arrival=np.full(n, current_time, dtype=np.float64),
         )
 
     def _input_bandwidths(
@@ -240,7 +250,7 @@ class RoutingEvent(EclypseEvent):
         return packets.take(order)
 
     def __call__(self, app: NetworkApplication, placement, infra: Network, **_kwargs):
-        """Forward the packets of the current step by one hop.
+        """Forward by one hop the packets that can move in the current step.
 
         Args:
             app (NetworkApplication): The application, with the packets generated in
@@ -254,11 +264,13 @@ class RoutingEvent(EclypseEvent):
         current_time_s = app.current_step * self.step_duration_s
 
         # Hosts: the packets generated in this step
-        batches = [self._inject_generated_packets(app, placement, infra)]
+        batches = [
+            self._inject_generated_packets(app, placement, infra, current_time_s)
+        ]
 
-        # Routers: the packets that arrived in the previous step
+        # Routers: the packets that have arrived by the current time
         logger = infra.logger.opt(lazy=True)
-        for router, packets in infra.take_router_batches():
+        for router, packets in infra.take_router_batches(current_time_s):
             ordered = self._build_probabilistic_queue(router, packets, infra)
             if len(ordered) > 1:
                 # Lazy: the string is built only if the INFO level is enabled
@@ -272,7 +284,7 @@ class RoutingEvent(EclypseEvent):
                 )
             batches.append(ordered)
 
-        # Forward everything by one hop, in processing order
+        # Forward these packets by one hop, in processing order
         infra.forward_batch(PacketBatch.concat(batches), current_time_s)
 
         # Update the link latencies based on the telemetry of the current step
