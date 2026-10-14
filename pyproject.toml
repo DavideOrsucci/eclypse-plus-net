@@ -69,6 +69,9 @@ docs = [
     "sphinx-favicon>=1.1.0",
     "sphinx-icon>=0.2.2",
 ]
+bench = [
+    "ray[tune]>=2.59.0",
+]
 
 # Build backend
 [build-system]
