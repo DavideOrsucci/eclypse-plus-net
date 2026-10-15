@@ -9,7 +9,9 @@ to ensure statistical significance.
 
 
 import random
+import shutil
 import time
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -42,6 +44,17 @@ from eclypse.simulation import (
     Simulation,
     SimulationConfig,
 )
+from eclypse.utils.defaults import get_default_sim_path
+
+RESULTS_DIR = get_default_sim_path() / "stress_test"
+
+
+def results_path(name: str) -> Path:
+    """Return an empty folder for the results of one simulation."""
+    path = RESULTS_DIR / name
+    # ECLYPSE writes to a new timestamped folder if the path exists: start from a clean one
+    shutil.rmtree(path, ignore_errors=True)
+    return path
 
 
 def run_eclypse_base_shared(base_infra: Infrastructure, steps: int = 10, run_idx: int = 0) -> float:
@@ -62,6 +75,7 @@ def run_eclypse_base_shared(base_infra: Infrastructure, steps: int = 10, run_idx
     config = SimulationConfig(
         seed=GLOBAL_SEED,
         max_steps=steps,
+        path=results_path(f"base_{num_nodes}_nodes_run{run_idx}"),
         include_default_metrics=False,
         log_level="ERROR"
     )
@@ -125,6 +139,7 @@ def run_eclypse_net_shared(base_infra: Infrastructure, total_pkt_per_step: int, 
     config = SimulationConfig(
         seed=GLOBAL_SEED,
         max_steps=steps,
+        path=results_path(f"net_{num_nodes}_nodes_{total_pkt_per_step}_pkt_run{run_idx}"),
         events=[packet_evt, routing_evt, metrics_evt],
         include_default_metrics=False,
         log_level="ERROR"
