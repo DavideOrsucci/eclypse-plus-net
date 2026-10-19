@@ -7,7 +7,7 @@
 ![PyPI - Version](https://img.shields.io/pypi/v/eclypse)
 ![PyPI - Python Version](https://img.shields.io/pypi/pyversions/eclypse)
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&)](https://github.com/pre-commit/pre-commit)
-[![codecov](https://codecov.io/github/eclypse-org/eclypse/graph/badge.svg?token=cxoy6qx1tF)](https://codecov.io/github/eclypse-org/eclypse)
+[![codecov](https://codecov.io/gh/DavideOrsucci/eclypse-plus-net/graph/badge.svg?token=QCG17TY9HM)](https://codecov.io/gh/DavideOrsucci/eclypse-plus-net)
 [![pre-commit.ci status](https://results.pre-commit.ci/badge/github/eclypse-org/eclypse/main.svg)](https://results.pre-commit.ci/latest/github/eclypse-org/eclypse/main)
 
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
