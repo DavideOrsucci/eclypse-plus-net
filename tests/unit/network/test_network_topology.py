@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from eclypse.network import Network
+from eclypse.network import network as network_module
 from eclypse.network.constants import MBPS_TO_BPS
 from eclypse.network.network import path_algorithm
 from tests.unit.network._helpers import make_batch
@@ -141,6 +142,51 @@ def test_path_algorithm_returns_empty_list_for_unreachable_nodes():
 
     assert path_algorithm(net, "A", "C") == []
     assert path_algorithm(net, "missing", "B") == []
+
+
+def test_path_algorithm_converts_the_graph_once_for_all_sources(monkeypatch):
+    net = _diamond()
+    calls = []
+    convert = network_module._to_rustworkx
+
+    def counting_convert(g):
+        calls.append(g)
+        return convert(g)
+
+    monkeypatch.setattr(network_module, "_to_rustworkx", counting_convert)
+
+    assert path_algorithm(net, "A", "B") == ["A", "R2", "B"]
+    assert path_algorithm(net, "R1", "B") == ["R1", "B"]
+    assert path_algorithm(net, "R2", "B") == ["R2", "B"]
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("through_infrastructure", [False, True])
+def test_path_cache_and_converted_graph_are_rebuilt_after_a_topology_change(
+    monkeypatch, through_infrastructure
+):
+    net = _diamond()
+    calls = []
+    convert = network_module._to_rustworkx
+
+    def counting_convert(g):
+        calls.append(g)
+        return convert(g)
+
+    monkeypatch.setattr(network_module, "_to_rustworkx", counting_convert)
+
+    def path(source, target):
+        if through_infrastructure:
+            return [u for u, _, _ in net.path(source, target)] + [target]
+        return path_algorithm(net, source, target)
+
+    assert path("A", "B") == ["A", "R2", "B"]
+
+    net.remove_edge("A", "R2")
+
+    assert path("A", "B") == ["A", "R1", "B"]
+    assert path("R1", "B") == ["R1", "B"]
+    assert len(calls) == 2
 
 
 def test_removing_a_link_reroutes_traffic():

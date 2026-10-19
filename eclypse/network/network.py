@@ -311,7 +311,9 @@ def path_algorithm(g: Infrastructure, source: str, target: str) -> list[str]:
     are weighted by their ``cost`` attribute (inverse of the bandwidth, as in
     OSPF). Paths are computed with one single-source Dijkstra per requested source
     and cached on the graph instance, so that only the sources actually queried by
-    ECLYPSE are computed.
+    ECLYPSE are computed. The rustworkx copy of the graph used by the Dijkstra is
+    built once and shared by all the sources; it is cached with the paths, so both
+    are discarded together when the cache is invalidated.
 
     Args:
         g (Infrastructure): The graph on which the path is computed.
@@ -324,12 +326,14 @@ def path_algorithm(g: Infrastructure, source: str, target: str) -> list[str]:
     """
     cache = g.__dict__.get("_path_cache")
     if cache is None:
-        cache = {}
+        cache = _PathCache()
         g.__dict__["_path_cache"] = cache
 
-    paths = cache.get(source)
+    paths = cache.paths.get(source)
     if paths is None:
-        rx_graph, node_to_rx, rx_to_node = _to_rustworkx(g)
+        if cache.rx is None:
+            cache.rx = _to_rustworkx(g)
+        rx_graph, node_to_rx, rx_to_node = cache.rx
         if source not in node_to_rx:
             return []
         rx_paths = rx.dijkstra_shortest_paths(
@@ -340,9 +344,27 @@ def path_algorithm(g: Infrastructure, source: str, target: str) -> list[str]:
             for t, p in rx_paths.items()
             if t != node_to_rx[source]
         }
-        cache[source] = paths
+        cache.paths[source] = paths
 
     return paths.get(target, [])
+
+
+class _PathCache:
+    """Paths computed by :func:`path_algorithm` on one graph.
+
+    Attributes:
+        paths (dict[str, dict[str, list[str]]]): The paths from each queried
+            source, keyed by source and then by target.
+        rx (tuple | None): The rustworkx copy of the graph returned by
+            :func:`_to_rustworkx`, or None until the first Dijkstra.
+    """
+
+    __slots__ = ("paths", "rx")
+
+    def __init__(self):
+        """Initialize an empty cache."""
+        self.paths: dict[str, dict[str, list[str]]] = {}
+        self.rx: tuple | None = None
 
 
 def _to_rustworkx(g) -> tuple:
