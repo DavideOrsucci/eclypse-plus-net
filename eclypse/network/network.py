@@ -191,7 +191,9 @@ class LinkState:
     transmission (``departures``): a packet arriving at time ``a`` waits
     ``max(0, busy_until - a)`` and then occupies the link for its transmission
     time (Lindley recursion). Partially transmitted packets are therefore
-    accounted for exactly, whatever the times at which the queue is observed.
+    accounted for exactly, whatever the times at which the queue is observed. A
+    link whose bandwidth is not positive cannot transmit and drops the packets
+    offered to it; the packets it had already accepted are still delivered.
 
     Attributes:
         u (str): Source node of the link.
@@ -430,7 +432,8 @@ class _Segments:
         wait0 (np.ndarray): Backlog of each link when the segment arrives, in
             seconds.
         allowed (np.ndarray): Number of packets of each segment accepted by the
-            DropTail policy; the remaining ones are dropped.
+            DropTail policy; the remaining ones are dropped. It is zero on links
+            whose bandwidth is not positive, which cannot transmit.
         csum (np.ndarray): Running total of ``sizes`` over the whole batch.
         before (np.ndarray): Value of ``csum`` just before the start of each
             segment.
@@ -472,9 +475,13 @@ class _Segments:
             rate, d_proc, d_prop, max_q = link.link_params()
             link.serve(current_time)
             len0 = link.queue_length
-            # DropTail: packet i is accepted while len0 + i < max_q
-            free = max_q - len0
-            self.allowed[j] = n if free >= n else max(0, math.ceil(free))
+            if rate <= 0:
+                # A link without bandwidth cannot transmit: it drops every packet
+                self.allowed[j] = 0
+            else:
+                # DropTail: packet i is accepted while len0 + i < max_q
+                free = max_q - len0
+                self.allowed[j] = n if free >= n else max(0, math.ceil(free))
             self.rate[j] = rate
             self.proc[j] = d_proc
             self.prop[j] = d_prop
@@ -556,11 +563,12 @@ class _Segments:
         departures = hops["departure"].tolist()
         delays = hops["hop_delay"].tolist()
         n_dropped = 0
-        for link, start, n, a in zip(
+        for link, start, n, a, rate in zip(
             self.links,
             self.starts.tolist(),
             self.counts.tolist(),
             self.allowed.tolist(),
+            self.rate.tolist(),
             strict=True,
         ):
             if link.count == 0 and link.dropped == 0:
@@ -575,10 +583,14 @@ class _Segments:
             if a < n:
                 link.dropped += n - a
                 n_dropped += n - a
-                network.logger.debug(
-                    f"{n - a} packets DROPPED at {link.u}: Queue full on link "
-                    f"{link.hop} (Limit: {link.attrs.get('max_queue_size')})"
+                reason = (
+                    "No bandwidth on link "
+                    f"{link.hop} (bandwidth_mbps: {link.attrs.get('bandwidth_mbps')})"
+                    if rate <= 0
+                    else f"Queue full on link {link.hop} "
+                    f"(Limit: {link.attrs.get('max_queue_size')})"
                 )
+                network.logger.debug(f"{n - a} packets DROPPED at {link.u}: {reason}")
         return n_dropped
 
 
@@ -753,7 +765,15 @@ class Network(Infrastructure):
             max_queue_size (int): The maximum number of packets that can wait in the
                 queue of the link. Defaults to 100.
             **attr: Additional attributes of the link.
+
+        Raises:
+            ValueError: If ``bandwidth_mbps`` is not positive.
         """
+        if bandwidth_mbps <= 0:
+            raise ValueError(
+                f"bandwidth_mbps must be positive (got {bandwidth_mbps} for "
+                f"{u_of_edge} -> {v_of_edge})."
+            )
         attr["bandwidth_mbps"] = bandwidth_mbps
         attr["length_km"] = length_km
         attr["propagation_speed_km_s"] = propagation_speed_km_s
@@ -1021,7 +1041,8 @@ class Network(Infrastructure):
 
         Packets are processed in the batch order. Each packet is routed to the
         next link of its path and either enters the queue of the link or, if the
-        queue is full, is dropped. Its hop delay is the sum of:
+        queue is full or the bandwidth of the link is not positive (e.g. set to
+        zero by an update policy), is dropped. Its hop delay is the sum of:
 
         - the processing time of the sending node;
         - the queuing delay, i.e. the time needed to transmit the bytes already in
