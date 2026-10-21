@@ -356,3 +356,69 @@ def test_two_hops_deliver_the_packets(line_network):
     assert np.all(delivered.hop == 2)
     assert cols["hop"] == ["R->B"] * 3
     assert len(line_network.in_transit) == 0
+
+
+# ---------------------------------------------------------------- zero bandwidth
+
+
+@pytest.mark.parametrize("bandwidth", [0.0, -5.0])
+def test_link_without_bandwidth_drops_every_packet(bandwidth):
+    net = build_line()
+    net.edges["A", "R"]["bandwidth_mbps"] = bandwidth
+
+    delivered, cols = _forward(net, make_batch(net, "A", "B", 3))
+
+    assert cols["dropped"] == [True, True, True]
+    for name in ("processing_ms", "queue_ms", "transmission_ms", "propagation_ms"):
+        assert cols[name] == [0.0, 0.0, 0.0]
+    assert net.dropped_packets == 3
+    assert len(net.in_transit) == 0
+    assert len(delivered) == 0
+    assert net._links["A", "R"].queue_length == 0
+
+
+def test_link_without_bandwidth_does_not_affect_other_links():
+    net = build_line()
+    net.edges["A", "R"]["bandwidth_mbps"] = 0.0
+
+    _, cols = _forward(
+        net,
+        PacketBatch.concat(
+            [
+                make_batch(net, "A", "B", 1),
+                make_batch(net, "B", "A", 1, first_id=10),
+            ]
+        ),
+    )
+
+    assert cols["dropped"] == [True, False]
+    assert cols["transmission_ms"][1] == pytest.approx(TX_MS)
+
+
+def test_packets_accepted_before_the_bandwidth_drops_are_delivered():
+    net = build_line()
+    _forward(net, make_batch(net, "A", "B", 2), t=T0)
+
+    net.edges["A", "R"]["bandwidth_mbps"] = 0.0
+    _, cols = _forward(net, make_batch(net, "A", "B", 1, first_id=10), t=T0)
+
+    assert cols["dropped"] == [True]
+    assert net._links["A", "R"].queue_length == 2
+    assert len(net.in_transit) == 2
+
+
+def test_dropping_on_a_link_without_bandwidth_logs_the_reason(net_logger):
+    net = build_line()
+    net.edges["A", "R"]["bandwidth_mbps"] = 0.0
+
+    _forward(net, make_batch(net, "A", "B", 2))
+
+    assert any("No bandwidth on link A->R" in m for m in net_logger.messages("debug"))
+
+
+@pytest.mark.parametrize("bandwidth", [0.0, -1.0])
+def test_add_edge_rejects_a_non_positive_bandwidth(bandwidth):
+    net = build_line()
+
+    with pytest.raises(ValueError, match="bandwidth_mbps must be positive"):
+        net.add_edge("A", "B", bandwidth_mbps=bandwidth)
