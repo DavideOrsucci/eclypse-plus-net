@@ -230,12 +230,36 @@ def test_packets_without_a_route_are_discarded_with_a_warning(line_network, net_
     assert cols["packet_id"] == []
     assert len(line_network.in_transit) == 0
     assert line_network.dropped_packets == 0
+    assert line_network.unroutable_packets == 2
+    assert line_network.lost_packets == 0
+    # One warning per destination, not one per packet
+    warnings = net_logger.messages("warning")
+    assert len(warnings) == 1
+    assert "2 packets dropped: No routes for C" in warnings[0]
+
+
+def test_unroutable_packets_get_one_warning_per_destination(line_network, net_logger):
+    line_network.add_host("C")
+    line_network.add_host("D")
+    batch = PacketBatch.concat(
+        [
+            make_batch(line_network, "A", "C", 3, first_id=1),
+            make_batch(line_network, "A", "B", 1, first_id=4),
+            make_batch(line_network, "A", "D", 1, first_id=5),
+        ]
+    )
+
+    _, cols = _forward(line_network, batch)
+
+    assert cols["packet_id"] == [4]
+    assert line_network.unroutable_packets == 4
     warnings = net_logger.messages("warning")
     assert len(warnings) == 2
-    assert all("No routes for C" in message for message in warnings)
+    assert "3 packets dropped: No routes for C" in warnings[0]
+    assert "1 packet dropped: No routes for D" in warnings[1]
 
 
-def test_packets_on_a_removed_node_are_discarded(line_network):
+def test_packets_on_a_removed_node_are_discarded(line_network, net_logger):
     batch = make_batch(line_network, "A", "B", 2, cur="R", prev="A", hop=1)
 
     line_network.remove_node("R")
@@ -243,6 +267,24 @@ def test_packets_on_a_removed_node_are_discarded(line_network):
 
     assert len(delivered) == 0
     assert cols["packet_id"] == []
+    assert line_network.lost_packets == 2
+    assert line_network.unroutable_packets == 0
+    assert any(
+        "2 packets lost: node R was removed or is down" in m
+        for m in net_logger.messages("warning")
+    )
+
+
+def test_take_router_batches_counts_the_packets_on_a_removed_router(line_network):
+    line_network.in_transit = make_batch(
+        line_network, "A", "B", 3, cur="R", prev="A", hop=1
+    )
+
+    line_network.remove_node("R")
+
+    assert line_network.take_router_batches() == []
+    assert line_network.lost_packets == 3
+    assert line_network.stranded_packets == 0
 
 
 # ---------------------------------------------------------------- router batches

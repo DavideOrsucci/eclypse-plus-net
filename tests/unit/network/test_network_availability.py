@@ -85,6 +85,7 @@ def test_packets_are_discarded_when_the_only_router_is_down(line_network, net_lo
 
     assert _first_hop(line_network, "A", "B") is None
     assert line_network.dropped_packets == 0
+    assert line_network.unroutable_packets == 1
     assert any("No routes for B" in m for m in net_logger.messages("warning"))
 
 
@@ -92,6 +93,7 @@ def test_packets_towards_a_host_that_is_down_are_discarded(line_network):
     line_network.nodes["B"]["availability"] = 0
 
     assert _first_hop(line_network, "A", "B") is None
+    assert line_network.unroutable_packets == 1
 
 
 def test_a_host_that_is_down_does_not_send_packets(line_network):
@@ -99,6 +101,8 @@ def test_a_host_that_is_down_does_not_send_packets(line_network):
 
     assert _first_hop(line_network, "A", "B") is None
     assert len(line_network.in_transit) == 0
+    assert line_network.lost_packets == 1
+    assert line_network.unroutable_packets == 0
 
 
 # ---------------------------------------------------------------- packets
@@ -114,6 +118,8 @@ def test_packets_on_a_router_that_goes_down_are_lost(line_network):
 
     assert line_network.take_router_batches() == []
     assert len(line_network.in_transit) == 0
+    assert line_network.lost_packets == 3
+    assert line_network.stranded_packets == 0
 
 
 def test_packets_in_transit_survive_if_the_router_is_back_up_in_time(line_network):

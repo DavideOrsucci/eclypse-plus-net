@@ -383,6 +383,11 @@ class _PathCache:
         self.rx: tuple | None = None
 
 
+def _packets(count: int) -> str:
+    """Return ``"1 packet"`` or ``"<count> packets"``, for log messages."""
+    return f"{count} packet" if count == 1 else f"{count} packets"
+
+
 def _to_rustworkx(g, nodes: list[str] | None = None) -> tuple:
     """Convert a graph into a rustworkx directed graph weighted by link cost.
 
@@ -653,6 +658,10 @@ class Network(Infrastructure):
         stranded_packets (int): Total number of packets discarded because they
             reached a host that is not their destination (hosts do not forward
             transit traffic).
+        unroutable_packets (int): Total number of packets discarded because their
+            destination was unreachable, e.g. removed, down or disconnected.
+        lost_packets (int): Total number of packets discarded because they were
+            on a node that was removed or is down, or travelling towards it.
         _app_ids (dict[str, int]): Index of every application whose packets have
             entered the network, in order of first appearance.
         _packet_counter (int): Number of packet identifiers allocated so far.
@@ -724,6 +733,8 @@ class Network(Infrastructure):
         self._packet_counter = 0
         self.dropped_packets = 0
         self.stranded_packets = 0
+        self.unroutable_packets = 0
+        self.lost_packets = 0
 
     # ------------------------------------------------------------------ topology
 
@@ -1232,8 +1243,10 @@ class Network(Infrastructure):
     def _route(self, batch: PacketBatch) -> tuple[PacketBatch, np.ndarray]:
         """Find the next-hop link of every packet.
 
-        Packets located on a node that is no longer in the network are discarded.
-        Packets whose destination is unreachable are discarded with a warning.
+        Packets located on a node that was removed or is down are discarded and
+        counted in :attr:`lost_packets` (see :meth:`_discard_lost`). Packets whose
+        destination is unreachable are discarded and counted in
+        :attr:`unroutable_packets`, with one warning per destination.
 
         Args:
             batch (PacketBatch): The packets to route.
@@ -1245,18 +1258,43 @@ class Network(Infrastructure):
         self._ensure_tables()
         if not len(batch):
             return batch, np.empty(0, dtype=np.int64)
-        batch = batch.take(self._alive[batch.cur])
+        batch = self._discard_lost(batch)
         link_of = self._fwd[batch.cur, batch.dst]  # type: ignore[index]
         no_route = link_of < 0
         if no_route.any():
-            names = self._node_names
-            for pid, dst in zip(
-                batch.id[no_route].tolist(), batch.dst[no_route].tolist(), strict=True
-            ):
-                self.logger.warning(f"Packet {pid} dropped: No routes for {names[dst]}")
+            self.unroutable_packets += int(no_route.sum())
+            dsts, counts = np.unique(batch.dst[no_route], return_counts=True)
+            for dst, count in zip(dsts.tolist(), counts.tolist(), strict=True):
+                self.logger.warning(
+                    f"{_packets(count)} dropped: No routes for {self._node_names[dst]}"
+                )
             batch = batch.take(~no_route)
             link_of = link_of[~no_route]
         return batch, link_of
+
+    def _discard_lost(self, batch: PacketBatch) -> PacketBatch:
+        """Discard the packets located on a node that was removed or is down.
+
+        They are counted in :attr:`lost_packets`, with one warning per node.
+
+        Args:
+            batch (PacketBatch): The packets, on nodes indexed by the current
+                forwarding tables.
+
+        Returns:
+            PacketBatch: The packets located on nodes that are up.
+        """
+        alive = self._alive[batch.cur]
+        if alive.all():
+            return batch
+        self.lost_packets += int(len(alive) - alive.sum())
+        nodes, counts = np.unique(batch.cur[~alive], return_counts=True)
+        for node, count in zip(nodes.tolist(), counts.tolist(), strict=True):
+            self.logger.warning(
+                f"{_packets(count)} lost: node {self._node_names[node]} was removed "
+                "or is down"
+            )
+        return batch.take(alive)
 
     def take_router_batches(
         self, current_time: float | None = None
@@ -1267,7 +1305,8 @@ class Network(Infrastructure):
         up to :data:`ARRIVAL_TOLERANCE_S`; the other packets stay in
         :attr:`in_transit`. Arrived packets located on a host are discarded and
         counted in :attr:`stranded_packets`, since hosts do not forward transit
-        traffic.
+        traffic. Arrived packets located on a node that was removed or is down are
+        discarded and counted in :attr:`lost_packets`.
 
         Args:
             current_time (float | None): Current simulation time, in seconds. If
@@ -1289,7 +1328,7 @@ class Network(Infrastructure):
             transit = transit.take(arrived)
         if not len(transit):
             return []
-        transit = transit.take(self._alive[transit.cur])
+        transit = self._discard_lost(transit)
         rank = self._router_rank[transit.cur]
         on_router = rank >= 0
         self.stranded_packets += int(len(rank) - on_router.sum())
