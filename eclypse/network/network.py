@@ -33,7 +33,6 @@ from .constants import (
     DEFAULT_PROPAGATION_SPEED_KM_S,
     MBPS_TO_BPS,
     MIN_LENGTH_KM,
-    MIN_PROPAGATION_SPEED,
     SEC_TO_MS,
 )
 
@@ -315,8 +314,7 @@ class LinkState:
         attrs = self.attrs
         rate = attrs.get("bandwidth_mbps", DEFAULT_BANDWIDTH_MBPS) * MBPS_TO_BPS
         d_proc = self.u_attrs.get("processing_time", 0.0)
-        speed = attrs.get("propagation_speed_km_s", MIN_PROPAGATION_SPEED)
-        d_prop = (attrs.get("length_km", MIN_LENGTH_KM) / speed) if speed > 0 else 0.0
+        d_prop = _propagation_delay_s(attrs)
         return rate, d_proc, d_prop, attrs.get("max_queue_size", float("inf"))
 
 
@@ -381,6 +379,26 @@ class _PathCache:
         """Initialize an empty cache."""
         self.paths: dict[str, dict[str, list[str]]] = {}
         self.rx: tuple | None = None
+
+
+def _propagation_delay_s(attrs: dict) -> float:
+    """Return the propagation delay of a link from its attributes.
+
+    A link without ``length_km`` is assumed to have length :data:`MIN_LENGTH_KM`
+    (no propagation delay), and a link without ``propagation_speed_km_s`` to
+    propagate at :data:`DEFAULT_PROPAGATION_SPEED_KM_S`. A speed that is not
+    positive gives no propagation delay, to avoid divisions by zero.
+
+    Args:
+        attrs (dict): The attributes of the link.
+
+    Returns:
+        float: The propagation delay, in seconds.
+    """
+    speed = attrs.get("propagation_speed_km_s", DEFAULT_PROPAGATION_SPEED_KM_S)
+    if speed <= 0:
+        return 0.0
+    return attrs.get("length_km", MIN_LENGTH_KM) / speed
 
 
 def _packets(count: int) -> str:
@@ -1117,9 +1135,7 @@ class Network(Infrastructure):
         """
         data = link.attrs
         d_proc = link.u_attrs.get("processing_time", 0.0) * SEC_TO_MS
-        speed = data.get("propagation_speed_km_s", MIN_PROPAGATION_SPEED)
-        length = data.get("length_km", MIN_LENGTH_KM)
-        d_prop = (length / speed) * SEC_TO_MS if speed > 0 else 0.0
+        d_prop = _propagation_delay_s(data) * SEC_TO_MS
         R = data.get("bandwidth_mbps", DEFAULT_BANDWIDTH_MBPS) * MBPS_TO_BPS
         d_transm = ((1500 * BYTES_TO_BITS) / R) * SEC_TO_MS if R > 0 else 0.0
         return d_proc + backlog_s * SEC_TO_MS + d_prop + d_transm

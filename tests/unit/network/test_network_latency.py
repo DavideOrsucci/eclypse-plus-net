@@ -70,6 +70,19 @@ def test_idle_estimate_uses_the_current_link_parameters(line_network):
     assert _latency(line_network, "A", "R") == pytest.approx(IDLE_MS + PROP_MS)
 
 
+def test_link_without_propagation_speed_uses_the_default_speed(line_network):
+    del line_network.edges["A", "R"]["propagation_speed_km_s"]
+    line_network.add_host("C")  # topology change: every link is refreshed
+
+    _step(line_network)
+    # Idle estimate: the 200 km of the link take 1 ms at the default speed
+    assert _latency(line_network, "A", "R") == pytest.approx(IDLE_MS)
+
+    _step(line_network, make_batch(line_network, "A", "B", 1), t=2.0)
+    hop = line_network.step_columns["propagation_ms"][0]
+    assert hop == pytest.approx(PROP_MS)
+
+
 def test_clear_step_telemetry_allocates_new_columns(line_network):
     line_network.clear_step_telemetry()
     line_network.forward_batch(make_batch(line_network, "A", "B", 2), 1.0)

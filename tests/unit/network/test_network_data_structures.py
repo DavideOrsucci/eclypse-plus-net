@@ -10,6 +10,7 @@ import pytest
 from eclypse.network import PacketBatch
 from eclypse.network.constants import (
     DEFAULT_BANDWIDTH_MBPS,
+    DEFAULT_PROPAGATION_SPEED_KM_S,
     MBPS_TO_BPS,
 )
 from eclypse.network.network import (
@@ -210,3 +211,22 @@ def test_link_params_fallbacks_for_missing_attributes():
     assert d_proc == 0.0
     assert d_prop == 0.0
     assert math.isinf(max_q)
+
+
+def test_link_without_propagation_speed_propagates_at_the_default_speed():
+    link = LinkState("u", "v", {"length_km": 400.0}, {})
+
+    d_prop = link.link_params()[2]
+
+    # 2 ms at 200000 km/s, not 400000 s at a fallback speed close to zero
+    assert d_prop == pytest.approx(400.0 / DEFAULT_PROPAGATION_SPEED_KM_S)
+    assert d_prop == pytest.approx(0.002)
+
+
+@pytest.mark.parametrize("speed", [0.0, -1.0])
+def test_link_with_a_non_positive_speed_has_no_propagation_delay(speed):
+    link = LinkState(
+        "u", "v", {"length_km": 400.0, "propagation_speed_km_s": speed}, {}
+    )
+
+    assert link.link_params()[2] == 0.0

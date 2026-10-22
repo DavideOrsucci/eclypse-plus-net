@@ -12,12 +12,9 @@ DEFAULT_PROPAGATION_SPEED_KM_S = 200000.0
 
 # Fallbacks for links without physical attributes
 MIN_LENGTH_KM = 0.0
-"""Physical length, in km, assumed for a link without the ``length_km`` attribute."""
-
-MIN_PROPAGATION_SPEED = 0.001
-"""Propagation speed, in km/s, assumed for a link without the
-``propagation_speed_km_s`` attribute. It is positive, to avoid divisions by zero.
-"""
+"""Physical length, in km, assumed for a link without the ``length_km`` attribute.
+A link without the ``propagation_speed_km_s`` attribute is assumed to propagate at
+:data:`DEFAULT_PROPAGATION_SPEED_KM_S`."""
 
 # Unit conversion factors
 MBPS_TO_BPS = 1_000_000.0
@@ -46,6 +43,5 @@ __all__ = [
     "DEFAULT_PROPAGATION_SPEED_KM_S",
     "MBPS_TO_BPS",
     "MIN_LENGTH_KM",
-    "MIN_PROPAGATION_SPEED",
     "SEC_TO_MS",
 ]
