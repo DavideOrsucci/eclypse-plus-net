@@ -125,12 +125,11 @@ class TimedRouting(timed(RoutingEvent)):
         self.hops: list[int] = []
         self.packets: list[int] = []
 
-    def __call__(self, app, placement, infra, **kwargs):
+    def route(self, applications, infra, step=None):
         """Forward the packets of the step and record the packets and hops."""
-        self.packets.append(app.num_generated)
-        out = super().__call__(app, placement, infra, **kwargs)
+        self.packets.append(sum(app.num_generated for app, _ in applications))
+        super().route(applications, infra, step)
         self.hops.append(len(infra.step_columns["hop"]))
-        return out
 
 
 def fingerprint(infra: Infrastructure, app) -> dict:

@@ -68,7 +68,18 @@ Each forwarded or dropped packet contributes one row:
 QUEUE_COMPACT_MIN = 1024
 """Minimum number of transmitted entries before a link queue list is compacted."""
 
-PACKET_FIELDS = ("id", "src", "dst", "size", "step", "cur", "prev", "hop", "arrival")
+PACKET_FIELDS = (
+    "id",
+    "src",
+    "dst",
+    "size",
+    "step",
+    "app",
+    "cur",
+    "prev",
+    "hop",
+    "arrival",
+)
 """Names of the fields of a :class:`PacketBatch`."""
 
 PACKET_DTYPES = {**dict.fromkeys(PACKET_FIELDS, np.int64), "arrival": np.float64}
@@ -98,6 +109,8 @@ class PacketBatch:
         dst (np.ndarray): Index of the destination node.
         size (np.ndarray): Packet size, in bytes.
         step (np.ndarray): Simulation step in which the packet was created.
+        app (np.ndarray): Index of the application that generated the packet, as
+            returned by :meth:`Network.application_index`.
         cur (np.ndarray): Index of the node where the packet currently is.
         prev (np.ndarray): Index of the node the packet came from, or ``-1`` if it
             has just been injected by its source.
@@ -115,6 +128,7 @@ class PacketBatch:
     dst: np.ndarray
     size: np.ndarray
     step: np.ndarray
+    app: np.ndarray
     cur: np.ndarray
     prev: np.ndarray
     hop: np.ndarray
@@ -620,11 +634,16 @@ class Network(Infrastructure):
             step whose time is not earlier than its arrival time.
         step_columns (dict[str, list]): Telemetry of the current step, with one list
             per name in :data:`TELEMETRY_COLUMNS` and one row per hop.
+        step_apps (list[int]): Index of the application of the packet of each
+            telemetry row of the current step (see :meth:`application_index`).
         dropped_packets (int): Total number of packets dropped because a link queue
             was full.
         stranded_packets (int): Total number of packets discarded because they
             reached a host that is not their destination (hosts do not forward
             transit traffic).
+        _app_ids (dict[str, int]): Index of every application whose packets have
+            entered the network, in order of first appearance.
+        _packet_counter (int): Number of packet identifiers allocated so far.
         _node_ids (dict[str, int]): Persistent index of every node ever added.
             Indices are never reused, so packets in transit keep valid references
             across topology changes.
@@ -684,6 +703,9 @@ class Network(Infrastructure):
         self._routers: list[str] | None = None
         self.in_transit = PacketBatch.empty()
         self.step_columns: dict[str, list] = {c: [] for c in TELEMETRY_COLUMNS}
+        self.step_apps: list[int] = []
+        self._app_ids: dict[str, int] = {}
+        self._packet_counter = 0
         self.dropped_packets = 0
         self.stranded_packets = 0
 
@@ -904,6 +926,48 @@ class Network(Infrastructure):
         if self._fwd is None:
             self.build_routing_tables()
 
+    # ------------------------------------------------------------------ traffic
+
+    def allocate_packet_ids(self, n: int) -> np.ndarray:
+        """Return ``n`` new packet identifiers, unique in the network.
+
+        Identifiers are consecutive integers starting from 1, shared by all the
+        applications whose traffic crosses the network.
+
+        Args:
+            n (int): The number of identifiers.
+
+        Returns:
+            np.ndarray: The identifiers, in increasing order.
+        """
+        first = self._packet_counter + 1
+        self._packet_counter += n
+        return np.arange(first, first + n, dtype=np.int64)
+
+    def application_index(self, app_id: str) -> int:
+        """Return the index of an application, registering it if needed.
+
+        The index identifies the application of each packet (:attr:`PacketBatch.app`)
+        and of each telemetry row (:attr:`step_apps`). Indices are assigned in order
+        of registration, starting from 0.
+
+        Args:
+            app_id (str): The identifier of the application.
+
+        Returns:
+            int: The index of the application.
+        """
+        idx = self._app_ids.get(app_id)
+        if idx is None:
+            idx = len(self._app_ids)
+            self._app_ids[app_id] = idx
+        return idx
+
+    @property
+    def application_ids(self) -> list[str]:
+        """Identifiers of the registered applications, in index order."""
+        return list(self._app_ids)
+
     # ------------------------------------------------------------------ roles
 
     @property
@@ -968,6 +1032,7 @@ class Network(Infrastructure):
         by the metric of the previous step remain valid.
         """
         self.step_columns = {c: [] for c in TELEMETRY_COLUMNS}
+        self.step_apps = []
         # Discard accumulators left over if update_link_latencies was not called
         for link in self._touched:
             link.delay_sum = 0.0
@@ -1103,6 +1168,7 @@ class Network(Infrastructure):
         ):
             cols[name].extend(hops[name][inv].tolist())
         cols["dropped"].extend((~acc).tolist())
+        self.step_apps.extend(batch.app.tolist())
 
         # Advance the accepted packets
         moved = batch.take(acc)

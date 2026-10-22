@@ -76,7 +76,9 @@ def test_concat_preserves_the_order_of_batches_and_packets():
     joined = PacketBatch.concat([_batch([1, 2]), _batch([3]), _batch([4, 5])])
 
     assert joined.id.tolist() == [1, 2, 3, 4, 5]
-    assert joined.hop.tolist() == [8, 16, 24, 32, 40]
+    # _batch multiplies the values of field i by i + 1
+    factor = PACKET_FIELDS.index("hop") + 1
+    assert joined.hop.tolist() == [factor * v for v in (1, 2, 3, 4, 5)]
 
 
 def test_concat_skips_empty_batches_and_returns_a_single_batch_unchanged():

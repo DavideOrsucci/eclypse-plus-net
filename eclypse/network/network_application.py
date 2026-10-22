@@ -5,6 +5,10 @@ This module defines :class:`NetworkApplication`, an ECLYPSE
 At every step, each flow generates a Poisson-distributed number of packets.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import numpy as np
 
 from eclypse.graph import Application
@@ -13,6 +17,9 @@ from .constants import (
     DEFAULT_AVG_PACKETS_PER_STEP,
     DEFAULT_PACKET_SIZE_BYTES,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class GeneratedTraffic:
@@ -64,7 +71,8 @@ class NetworkApplication(Application):
         generated (GeneratedTraffic | None): The packets generated in the current
             step and not yet injected into the network, or None if there are none.
         _packet_counter (int): Number of packets generated so far, used to assign
-            unique packet identifiers.
+            packet identifiers when no allocator is given to
+            :meth:`generate_traffic_for_step`.
     """
 
     def __init__(self, *args, **kwargs):
@@ -133,7 +141,11 @@ class NetworkApplication(Application):
             f"size {packet_size_bytes}B"
         )
 
-    def generate_traffic_for_step(self, step: int) -> None:
+    def generate_traffic_for_step(
+        self,
+        step: int,
+        allocate_ids: Callable[[int], np.ndarray] | None = None,
+    ) -> None:
         """Generate the packets of all the flows for a simulation step.
 
         The number of packets of each flow is drawn from a Poisson distribution
@@ -144,6 +156,13 @@ class NetworkApplication(Application):
 
         Args:
             step (int): The simulation step in which the packets are generated.
+            allocate_ids (Callable[[int], np.ndarray] | None): Function that
+                returns ``n`` new packet identifiers, such as
+                :meth:`Network.allocate_packet_ids
+                <eclypse.network.Network.allocate_packet_ids>`, which keeps the
+                identifiers unique across all the applications of a network. If
+                None, the identifiers are numbered per application. Defaults to
+                None.
         """
         self.generated = None
 
@@ -167,9 +186,14 @@ class NetworkApplication(Application):
         total = int(counts.sum())
 
         # Packets are numbered consecutively, flow after flow
-        ids = np.arange(
-            self._packet_counter + 1, self._packet_counter + 1 + total, dtype=np.int64
-        )
+        if allocate_ids is None:
+            ids = np.arange(
+                self._packet_counter + 1,
+                self._packet_counter + 1 + total,
+                dtype=np.int64,
+            )
+        else:
+            ids = allocate_ids(total)
         self._packet_counter += total
         self.generated = GeneratedTraffic(
             flows, np.repeat(np.arange(len(flows)), counts), ids, step

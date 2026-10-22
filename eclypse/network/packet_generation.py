@@ -10,10 +10,12 @@ from .network_application import NetworkApplication
 class PacketGenerationEvent(EclypseEvent):
     """Event that generates the packets of a :class:`NetworkApplication`.
 
-    The event runs at every simulation step. It advances the step counter of the
-    application and generates the packets of all its flows, which are then injected
-    into the network by the :class:`~eclypse.network.RoutingEvent`. It must
-    therefore be registered before the routing event.
+    The event runs at every simulation step, once for every application. It
+    advances the step counter of the application and generates the packets of all
+    its flows, which are then injected into the network by the
+    :class:`~eclypse.network.RoutingEvent`. It must therefore be registered before
+    the routing event. Packet identifiers are allocated by the :class:`Network`, so
+    they are unique across all the applications.
     """
 
     def __init__(self):
@@ -24,13 +26,14 @@ class PacketGenerationEvent(EclypseEvent):
             triggers=[CascadeTrigger("step")],
         )
 
-    def __call__(self, app: NetworkApplication, _placement, _infra: Network, **_kwargs):
+    def __call__(self, app: NetworkApplication, _placement, infra: Network, **_kwargs):
         """Advance the application to the next step and generate its packets.
 
         Args:
             app (NetworkApplication): The application that generates the traffic.
             _placement (Placement): The placement of the application (unused).
-            _infra (Network): The network infrastructure (unused).
+            infra (Network): The network infrastructure, which allocates the
+                packet identifiers.
             **_kwargs: Additional arguments provided by the framework (unused).
 
         Returns:
@@ -38,7 +41,8 @@ class PacketGenerationEvent(EclypseEvent):
                 ``packets_generated``.
         """
         app.current_step += 1
-        app.generate_traffic_for_step(app.current_step)
+        allocate_ids = infra.allocate_packet_ids if isinstance(infra, Network) else None
+        app.generate_traffic_for_step(app.current_step, allocate_ids)
         self.logger.debug(
             f"step {app.current_step}: "
             f"App '{app.id}' has generated "

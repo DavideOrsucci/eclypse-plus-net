@@ -76,6 +76,7 @@ def make_batch(
     hop: int = 0,
     first_id: int = 1,
     arrival: float = 0.0,
+    app: int = 0,
 ) -> PacketBatch:
     """Build a batch of ``n`` identical packets from ``src`` to ``dst``."""
     cur_idx = net.node_index(cur or src)
@@ -86,6 +87,7 @@ def make_batch(
         dst=np.full(n, net.node_index(dst), dtype=np.int64),
         size=np.full(n, size, dtype=np.int64),
         step=np.zeros(n, dtype=np.int64),
+        app=np.full(n, app, dtype=np.int64),
         cur=np.full(n, cur_idx, dtype=np.int64),
         prev=np.full(n, prev_idx, dtype=np.int64),
         hop=np.full(n, hop, dtype=np.int64),

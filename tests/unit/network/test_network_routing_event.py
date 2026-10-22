@@ -28,7 +28,7 @@ from tests.unit.network._helpers import (
 
 def _run_step(app, placement, infra, routing=None):
     PacketGenerationEvent()(app, placement, infra)
-    (routing or RoutingEvent(step_duration_s=0.001))(app, placement, infra)
+    (routing or RoutingEvent(step_duration_s=0.001)).route([(app, placement)], infra)
     return infra.step_columns
 
 
@@ -91,15 +91,6 @@ def test_generated_packets_are_injected_at_the_time_of_the_step(line_network, li
     assert batch.arrival.tolist() == [0.25] * len(batch)
 
 
-class _NoTrafficApp:
-    """Application stand-in without new packets, at a given step."""
-
-    generated = None
-
-    def __init__(self, step: int):
-        self.current_step = step
-
-
 def test_a_packet_is_not_forwarded_before_it_arrives(line_network):
     routing = RoutingEvent(step_duration_s=0.001)
     line_network.clear_step_telemetry()
@@ -109,7 +100,7 @@ def test_a_packet_is_not_forwarded_before_it_arrives(line_network):
     last_arrival_ms = line_network.step_columns["arrival_at_next"][-1]
     assert last_arrival_ms > 50.0
 
-    routing(_NoTrafficApp(2), None, line_network)  # step 2: t = 2 ms
+    routing.route([], line_network, step=2)  # step 2: t = 2 ms
 
     assert 50 not in line_network.step_columns["packet_id"]
     assert 50 in line_network.in_transit.id.tolist()
@@ -124,7 +115,7 @@ def test_a_packet_is_forwarded_in_the_first_step_after_its_arrival(line_network)
 
     forwarded_at = []
     for step in range(2, 7):
-        routing(_NoTrafficApp(step), None, line_network)
+        routing.route([], line_network, step=step)
         if line_network.step_columns["hop"] == ["R->B"]:
             forwarded_at.append(step)
 
@@ -215,6 +206,7 @@ def _buffer(infra: Network, prev_hosts: list[str]) -> PacketBatch:
         dst=np.full(n, out, dtype=np.int64),
         size=np.full(n, 100, dtype=np.int64),
         step=np.zeros(n, dtype=np.int64),
+        app=np.zeros(n, dtype=np.int64),
         cur=np.full(n, infra.node_index("R"), dtype=np.int64),
         prev=np.array([infra.node_index(h) for h in prev_hosts], dtype=np.int64),
         hop=np.ones(n, dtype=np.int64),

@@ -2,6 +2,7 @@
 
 import random
 from itertools import accumulate
+from typing import Any
 
 import numpy as np
 
@@ -19,11 +20,13 @@ from .network_application import NetworkApplication
 class RoutingEvent(EclypseEvent):
     """Event that forwards by one hop the packets that can move in the current step.
 
-    The event, named ``traffic_routing_execution``, runs at every step after the
-    :class:`~eclypse.network.PacketGenerationEvent`. It:
+    The event, named ``traffic_routing_execution``, runs once per step, after the
+    :class:`~eclypse.network.PacketGenerationEvent` of every application. It
+    handles the traffic of the whole network, i.e. of all the
+    :class:`~eclypse.network.NetworkApplication` instances of the simulation:
 
-    1. injects the packets generated in the step on the hosts where their source
-       services are placed;
+    1. injects the packets generated in the step by every application on the hosts
+       where their source services are placed;
     2. takes the packets that have reached a router by the current time, and
        merges the packets of each router, received on different input links, with
        a probabilistic multiplexer weighted by the link bandwidths;
@@ -36,14 +39,18 @@ class RoutingEvent(EclypseEvent):
     hop, the packet stays in transit for several steps.
 
     Packets are processed host by host, in :attr:`Network.hosts` order, and then
-    router by router, in :attr:`Network.routers` order. The processing order
-    determines which packets find a queue full, so it affects delays and drops.
+    router by router, in :attr:`Network.routers` order. The packets injected by a
+    host are in order of application registration and then of generation. The
+    processing order determines which packets find a queue full, so it affects
+    delays and drops.
 
     Attributes:
         step_duration_s (float): The simulated duration of a step, in seconds. The
             current time is the step number multiplied by this duration. Packets
             are forwarded at the start of the first step that follows their
             arrival, so a shorter step gives a finer time resolution.
+        current_step (int): The number of the current step, advanced at every
+            call. It is the clock of the network, shared by all the applications.
     """
 
     def __init__(self, step_duration_s=0.001):
@@ -54,9 +61,9 @@ class RoutingEvent(EclypseEvent):
                 Defaults to 0.001.
         """
         self.step_duration_s = step_duration_s
+        self.current_step = 0
         super().__init__(
             name="traffic_routing_execution",
-            event_type="application",
             triggers=[CascadeTrigger("step")],
         )
 
@@ -69,7 +76,9 @@ class RoutingEvent(EclypseEvent):
         placement. Packets are discarded if either service is not placed, or if the
         source service is placed on a router. The remaining packets are sorted by
         source host, in :attr:`Network.hosts` order, keeping the generation order
-        within each host. The generated traffic of the application is consumed.
+        within each host. The generated traffic of the application is consumed, and
+        the application is registered in the network
+        (:meth:`Network.application_index`) if needed.
 
         Args:
             app (NetworkApplication): The application that generated the packets.
@@ -81,6 +90,7 @@ class RoutingEvent(EclypseEvent):
         Returns:
             PacketBatch: The injected packets, in processing order.
         """
+        app_index = infra.application_index(app.id)
         generated = app.generated
         app.generated = None
         if generated is None or not len(generated):
@@ -140,6 +150,7 @@ class RoutingEvent(EclypseEvent):
             dst=flow_dst[flow],
             size=sizes[flow],
             step=np.full(n, generated.step, dtype=np.int64),
+            app=np.full(n, app_index, dtype=np.int64),
             cur=src,
             prev=np.full(n, -1, dtype=np.int64),
             hop=np.zeros(n, dtype=np.int64),
@@ -249,23 +260,56 @@ class RoutingEvent(EclypseEvent):
         order[np.argsort(seq, kind="stable")] = np.argsort(source_of, kind="stable")
         return packets.take(order)
 
-    def __call__(self, app: NetworkApplication, placement, infra: Network, **_kwargs):
+    def __call__(self, *_args, **_kwargs):
         """Forward by one hop the packets that can move in the current step.
 
+        The traffic of every :class:`NetworkApplication` registered in the
+        simulation is forwarded through the infrastructure of the simulation.
+
         Args:
-            app (NetworkApplication): The application, with the packets generated in
-                the step.
-            placement (Placement): The placement of the application services.
-            infra (Network): The network infrastructure.
+            *_args: The triggering event, provided by the framework (unused).
             **_kwargs: Additional arguments provided by the framework (unused).
         """
+        simulator = self.simulator
+        applications = [
+            (placement.application, placement)
+            for placement in simulator.placements.values()
+            if isinstance(placement.application, NetworkApplication)
+        ]
+        self.route(applications, simulator.infrastructure)
+
+    def route(
+        self,
+        applications: list[tuple[NetworkApplication, Any]],
+        infra: Network,
+        step: int | None = None,
+    ):
+        """Run one step of the network: inject, forward and update the latencies.
+
+        Args:
+            applications (list[tuple[NetworkApplication, Placement]]): The
+                applications whose packets are injected, with their placements, in
+                order of registration.
+            infra (Network): The network infrastructure.
+            step (int | None): The number of the step. If None, the step after
+                :attr:`current_step`. Defaults to None.
+        """
+        self.current_step = self.current_step + 1 if step is None else step
         infra.clear_step_telemetry()
         infra._ensure_tables()  # pylint: disable=protected-access
-        current_time_s = app.current_step * self.step_duration_s
+        current_time_s = self.current_step * self.step_duration_s
 
-        # Hosts: the packets generated in this step
+        # Hosts: the packets generated in this step by all the applications
         batches = [
-            self._inject_generated_packets(app, placement, infra, current_time_s)
+            self._order_by_source_host(
+                [
+                    self._inject_generated_packets(
+                        app, placement, infra, current_time_s
+                    )
+                    for app, placement in applications
+                ],
+                infra,
+            )
         ]
 
         # Routers: the packets that have arrived by the current time
@@ -289,3 +333,24 @@ class RoutingEvent(EclypseEvent):
 
         # Update the link latencies based on the telemetry of the current step
         infra.update_link_latencies()
+
+    @staticmethod
+    def _order_by_source_host(
+        injected: list[PacketBatch], infra: Network
+    ) -> PacketBatch:
+        """Merge the packets injected by the applications, host by host.
+
+        Args:
+            injected (list[PacketBatch]): The packets of each application, each
+                sorted by source host.
+            infra (Network): The network infrastructure.
+
+        Returns:
+            PacketBatch: The packets sorted by source host, in :attr:`Network.hosts`
+                order, and then by application and generation order.
+        """
+        batch = PacketBatch.concat(injected)
+        if sum(1 for b in injected if len(b)) > 1:
+            host_rank = infra._host_rank  # pylint: disable=protected-access
+            batch = batch.take(np.argsort(host_rank[batch.src], kind="stable"))
+        return batch

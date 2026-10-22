@@ -140,13 +140,12 @@ class TimedRouting(RoutingEvent):
         self.durations: list[float] = []
         self.hops: list[int] = []
 
-    def __call__(self, app, placement, infra, **kwargs):
+    def route(self, applications, infra, step=None):
         """Forward the packets of the step and record time and hops."""
         start = time.perf_counter()
-        out = super().__call__(app, placement, infra, **kwargs)
+        super().route(applications, infra, step)
         self.durations.append(time.perf_counter() - start)
         self.hops.append(len(infra.step_columns["hop"]))
-        return out
 
 
 def record_deliveries(net: Network, step_duration_s: float) -> dict[str, list]:

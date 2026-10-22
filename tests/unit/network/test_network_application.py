@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from eclypse.network import (
+    Network,
     NetworkApplication,
     PacketGenerationEvent,
 )
@@ -120,6 +121,20 @@ def test_packet_ids_are_unique_across_steps():
 
     assert first and second
     assert second[0] == first[-1] + 1
+
+
+def test_packet_ids_can_be_allocated_by_a_network():
+    app = _app(a_b=(5.0, 100))
+    net = Network("n")
+    net.allocate_packet_ids(10)  # identifiers already used by another application
+    np.random.seed(0)
+
+    app.generate_traffic_for_step(1, net.allocate_packet_ids)
+
+    n = app.num_generated
+    assert n > 0
+    assert app.generated.id.tolist() == list(range(11, 11 + n))
+    assert net.allocate_packet_ids(1).tolist() == [11 + n]
 
 
 def test_zero_rate_flows_generate_no_packets():
