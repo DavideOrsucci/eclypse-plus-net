@@ -10,6 +10,51 @@ from pathlib import Path
 PROGRAM = "eclypse_scenario"
 """Name of the ns-3 program, built from ``eclypse_scenario.cc`` in ``scratch/``."""
 
+STDERR_LINES = 30
+"""Lines of the standard error of a failed ns-3 run reported in the error."""
+
+
+class Ns3Error(RuntimeError):
+    """Error raised when the ns-3 program fails, with the end of its standard error.
+
+    Attributes:
+        command (list[str]): The command that was run.
+        returncode (int): The exit code of the program (negative if it was killed by
+            a signal).
+        stderr (str): The whole standard error of the program.
+    """
+
+    def __init__(self, command: list[str], returncode: int, stderr: str):
+        """Initialize the error.
+
+        Args:
+            command (list[str]): The command that was run.
+            returncode (int): The exit code of the program.
+            stderr (str): The standard error of the program.
+        """
+        self.command = command
+        self.returncode = returncode
+        self.stderr = stderr
+        status = (
+            f"was killed by signal {-returncode}"
+            if returncode < 0
+            else f"exited with code {returncode}"
+        )
+        lines = stderr.strip().splitlines()
+        tail = "\n".join(lines[-STDERR_LINES:]) if lines else "(empty)"
+        skipped = (
+            f" (last {STDERR_LINES} of {len(lines)} lines)"
+            if len(lines) > STDERR_LINES
+            else ""
+        )
+        super().__init__(
+            f"ns-3 {status}: {' '.join(command)}\nstderr{skipped}:\n{tail}"
+        )
+
+    def __reduce__(self):
+        """Rebuild the error from its arguments, e.g. when it crosses processes."""
+        return (self.__class__, (self.command, self.returncode, self.stderr))
+
 
 def find_program(ns3_dir: Path) -> Path:
     """Return the executable of :data:`PROGRAM` built in an ns-3 folder.
@@ -49,21 +94,20 @@ def run_ns3(executable: Path, scenario_dir: Path, output_dir: Path) -> dict:
             ``ip_drops``, ``setup_time_s``, ``run_time_s``, ...).
 
     Raises:
-        subprocess.CalledProcessError: If the program fails.
+        Ns3Error: If the program fails; the error includes the end of its standard
+            error.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+    command = [
+        str(executable),
+        f"--input={scenario_dir.resolve()}",
+        f"--output={output_dir.resolve()}",
+    ]
     start = time.perf_counter()
-    subprocess.run(
-        [
-            str(executable),
-            f"--input={scenario_dir.resolve()}",
-            f"--output={output_dir.resolve()}",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
     wall_time = time.perf_counter() - start
+    if result.returncode != 0:
+        raise Ns3Error(command, result.returncode, result.stderr)
 
     with (output_dir / "stats.csv").open() as f:
         stats = {row["key"]: float(row["value"]) for row in csv.DictReader(f)}

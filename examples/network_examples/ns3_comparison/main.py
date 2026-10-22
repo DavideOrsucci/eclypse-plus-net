@@ -240,7 +240,7 @@ def main(args: argparse.Namespace):
             try:
                 row = future.result()
             except Exception as e:  # report the failure and go on
-                print(f"[{i}/{len(configs)}] {name} failed: {e!r}")
+                print(f"[{i}/{len(configs)}] {name} failed: {type(e).__name__}: {e}")
                 continue
             results.append(row)
             print(
