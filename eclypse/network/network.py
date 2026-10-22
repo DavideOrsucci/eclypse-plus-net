@@ -383,23 +383,26 @@ class _PathCache:
         self.rx: tuple | None = None
 
 
-def _to_rustworkx(g) -> tuple:
+def _to_rustworkx(g, nodes: list[str] | None = None) -> tuple:
     """Convert a graph into a rustworkx directed graph weighted by link cost.
 
     Args:
         g (nx.DiGraph): The graph to convert.
+        nodes (list[str] | None): The nodes to keep, with the links between them.
+            If None, all the nodes. Defaults to None.
 
     Returns:
         tuple: The rustworkx ``PyDiGraph``, the mapping from node names to
             rustworkx indices, and the list mapping rustworkx indices to node names.
     """
     rx_graph = rx.PyDiGraph()
-    rx_to_node = list(g.nodes())
+    rx_to_node = list(g.nodes()) if nodes is None else nodes
     node_to_rx = {node: rx_graph.add_node(node) for node in rx_to_node}
     rx_graph.add_edges_from(
         [
             (node_to_rx[u], node_to_rx[v], data.get("cost", 1.0))
             for u, v, data in g.edges(data=True)
+            if nodes is None or (u in node_to_rx and v in node_to_rx)
         ]
     )
     return rx_graph, node_to_rx, rx_to_node
@@ -621,6 +624,15 @@ class Network(Infrastructure):
     the bandwidth (as in OSPF). The forwarding tables are computed when first
     needed and rebuilt after every topology change.
 
+    Node failures follow the availability model of ECLYPSE: a node whose
+    ``availability`` is not positive is down, so routes avoid it and the packets
+    on it or travelling towards it are lost, as if it had been removed. The
+    forwarding tables are rebuilt when a node goes down or comes back up, so the
+    node failure policies of ECLYPSE (e.g. ``availability_flap``, ``kill_nodes``)
+    affect the traffic. Like ECLYPSE, the network ignores the ``availability`` of
+    the links: a link failure must remove the edge (:meth:`remove_edge`) or set its
+    bandwidth to zero.
+
     At every step, :meth:`forward_batch` moves by one hop the packets injected by
     the hosts and the packets that have reached a router, i.e. whose arrival time
     is not later than the current time. The other packets stay in transit until
@@ -656,7 +668,10 @@ class Network(Infrastructure):
         _link_v (np.ndarray): Index of the destination node of each link.
         _link_hops (np.ndarray): Telemetry label (``"u->v"``) of each link.
         _alive (np.ndarray): Whether each node index belongs to the current
-            topology.
+            topology and is available (``availability > 0``, see
+            :meth:`~eclypse.graph.Infrastructure.is_available`).
+        _availability_changed (bool): Whether the availability of a node has
+            changed since the forwarding tables were built.
         _host_rank (np.ndarray): Position of each node in :attr:`hosts`, or ``-1``.
         _router_rank (np.ndarray): Position of each node in :attr:`routers`, or
             ``-1``.
@@ -693,6 +708,7 @@ class Network(Infrastructure):
         self._link_v = np.empty(0, dtype=np.int64)
         self._link_hops = np.empty(0, dtype=object)
         self._alive = np.empty(0, dtype=bool)
+        self._availability_changed = False
         self._host_rank = np.empty(0, dtype=np.int64)
         self._router_rank = np.empty(0, dtype=np.int64)
         self._links: dict[tuple[str, str], LinkState] = {}
@@ -729,15 +745,22 @@ class Network(Infrastructure):
     def _invalidate_node_attrs(self, keys):
         """Invalidate the caches affected by a change of node attributes.
 
-        In addition to the base behavior, discards the cached paths of the
-        ``available`` view when the availability of a node changes.
+        In addition to the base behavior, when the availability of a node changes,
+        discards the cached paths of the ``available`` view and marks the
+        forwarding tables for a check: they are rebuilt at the next forwarding if
+        the set of available nodes has changed (see :meth:`_ensure_tables`).
 
         Args:
             keys (tuple): The names of the changed node attributes.
         """
         super()._invalidate_node_attrs(keys)
-        if "availability" in keys and self.__dict__.get("_available") is not None:
+        if "availability" not in keys:
+            return
+        if self.__dict__.get("_available") is not None:
             self._available.__dict__.pop("_path_cache", None)
+        # The instance might not be fully initialized yet (base __init__)
+        if "_fwd" in self.__dict__:
+            self._availability_changed = True
 
     def add_node(self, node_for_adding: str, strict: bool = False, **assets):
         """Add a node to the network.
@@ -885,6 +908,12 @@ class Network(Infrastructure):
         ``_fwd``. This lets the next hop of a whole batch of packets be resolved
         with a single array lookup. Also refreshes the per-node role and
         availability arrays.
+
+        As in ECLYPSE, a node is up if its ``availability`` is positive (see
+        :meth:`~eclypse.graph.Infrastructure.is_available`). Paths only cross
+        nodes that are up, so the forwarding tables match the paths that ECLYPSE
+        computes on the ``available`` view of the network. A node that is down
+        neither forwards nor receives packets, as if it had been removed.
         """
         self._sync_links()
         for node in self.nodes():
@@ -898,15 +927,18 @@ class Network(Infrastructure):
         self._link_v = np.array([ids[link.v] for link in link_list], dtype=np.int64)
         self._link_hops = np.array([link.hop for link in link_list], dtype=object)
 
+        up = self._available_nodes()
         alive = np.zeros(n, dtype=bool)
-        alive[[ids[node] for node in self.nodes()]] = True
+        alive[[ids[node] for node in up]] = True
         self._alive = alive
+        self._availability_changed = False
         self._host_rank = np.full(n, -1, dtype=np.int64)
         self._host_rank[[ids[h] for h in self.hosts]] = np.arange(len(self.hosts))
         self._router_rank = np.full(n, -1, dtype=np.int64)
         self._router_rank[[ids[r] for r in self.routers]] = np.arange(len(self.routers))
 
-        rx_graph, _, rx_to_node = _to_rustworkx(self)
+        all_up = len(up) == self.number_of_nodes()
+        rx_graph, _, rx_to_node = _to_rustworkx(self, None if all_up else up)
         rx_paths = rx.all_pairs_dijkstra_shortest_paths(rx_graph, float)
 
         fwd = np.full((n, n), -1, dtype=np.int32)
@@ -921,8 +953,25 @@ class Network(Infrastructure):
                 fwd[ids[source], cols] = vals
         self._fwd = fwd
 
+    def _available_nodes(self) -> list[str]:
+        """Return the nodes that are up, i.e. whose availability is positive."""
+        return [n for n in self.nodes() if self.is_available(n)]
+
     def _ensure_tables(self):
-        """Build the forwarding tables if they are missing or outdated."""
+        """Build the forwarding tables if they are missing or outdated.
+
+        The tables are outdated after a change of the topology, or after a change
+        of availability that turns a node up or down. Availability values that
+        change without crossing zero (e.g. from 0.99 to 0.98) leave the tables
+        valid, so they are not rebuilt.
+        """
+        if self._fwd is not None and self._availability_changed:
+            self._availability_changed = False
+            up = np.zeros(len(self._alive), dtype=bool)
+            ids = self._node_ids
+            up[[ids[node] for node in self._available_nodes()]] = True
+            if not np.array_equal(up, self._alive):
+                self._fwd = None
         if self._fwd is None:
             self.build_routing_tables()
 
@@ -1244,6 +1293,8 @@ class Network(Infrastructure):
         rank = self._router_rank[transit.cur]
         on_router = rank >= 0
         self.stranded_packets += int(len(rank) - on_router.sum())
+        if not on_router.any():
+            return []
         transit = transit.take(on_router)
         rank = rank[on_router]
         order = np.argsort(rank, kind="stable")
