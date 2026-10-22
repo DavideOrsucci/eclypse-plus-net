@@ -123,11 +123,11 @@ class NetworkApplication(Application):
 
         Raises:
             ValueError: If ``packet_size_bytes`` is not positive or
-                ``avg_packets_per_step`` is negative.
+                ``avg_packets_per_step`` is negative or NaN.
         """
         if packet_size_bytes <= 0:
             raise ValueError(f"Packet size must be > 0. Found: {packet_size_bytes}")
-        if avg_packets_per_step < 0:
+        if not avg_packets_per_step >= 0:  # also rejects NaN
             raise ValueError(f"Packet rate must be >= 0. Found: {avg_packets_per_step}")
         attr["packet_size_bytes"] = packet_size_bytes
         attr["avg_packets_per_step"] = avg_packets_per_step
@@ -153,6 +153,10 @@ class NetworkApplication(Application):
         parameters are read at every call, so changes made by update policies take
         effect immediately. The result is stored in :attr:`generated`, replacing
         any packets not yet injected.
+
+        Update policies without a lower bound, such as noise policies, can make a
+        rate negative or NaN. Such a rate is treated as zero, so the flow generates
+        no packets in the step; the attribute of the flow is left unchanged.
 
         Args:
             step (int): The simulation step in which the packets are generated.
@@ -180,9 +184,19 @@ class NetworkApplication(Application):
         if not flows:
             return
 
+        # A negative or NaN rate (e.g. set by a noise policy) means no packets
+        lam = np.asarray(rates, dtype=np.float64)
+        invalid = ~(lam >= 0)
+        if invalid.any():
+            lam[invalid] = 0.0
+            self.logger.debug(
+                f"Step {step}: {int(invalid.sum())} flow(s) with a negative or NaN "
+                "packet rate generate no packets."
+            )
+
         # One Poisson draw per flow, taken from the global numpy random state so
         # that results are reproducible with np.random.seed
-        counts = np.random.poisson(rates)
+        counts = np.random.poisson(lam)
         total = int(counts.sum())
 
         # Packets are numbered consecutively, flow after flow

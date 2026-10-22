@@ -14,6 +14,7 @@ from eclypse.network.constants import (
     DEFAULT_AVG_PACKETS_PER_STEP,
     DEFAULT_PACKET_SIZE_BYTES,
 )
+from eclypse.policies.noise import additive_jitter
 
 
 def _app(**flows: tuple[float, int]) -> NetworkApplication:
@@ -51,8 +52,8 @@ def test_add_edge_defaults():
 
 @pytest.mark.parametrize(
     ("size", "rate"),
-    [(0, 1.0), (-10, 1.0), (100, -0.5)],
-    ids=["zero-size", "negative-size", "negative-rate"],
+    [(0, 1.0), (-10, 1.0), (100, -0.5), (100, float("nan"))],
+    ids=["zero-size", "negative-size", "negative-rate", "nan-rate"],
 )
 def test_add_edge_rejects_invalid_traffic_parameters(size, rate):
     app = NetworkApplication("app")
@@ -144,6 +145,49 @@ def test_zero_rate_flows_generate_no_packets():
     for step in range(1, 6):
         app.generate_traffic_for_step(step)
         assert not np.any(app.generated.flow == 0)
+
+
+@pytest.mark.parametrize("rate", [-3.0, float("nan")], ids=["negative", "nan"])
+def test_negative_or_nan_rates_set_by_a_policy_generate_no_packets(rate):
+    app = _app(a_b=(5.0, 100), b_a=(50.0, 100))
+    app.edges["a", "b"]["avg_packets_per_step"] = rate  # bypasses add_edge
+    np.random.seed(0)
+
+    app.generate_traffic_for_step(1)
+
+    flow = app.generated.flow
+    assert len(flow) > 0
+    assert not np.any(flow == 0)
+    # The value written by the policy is left unchanged
+    value = app.edges["a", "b"]["avg_packets_per_step"]
+    assert value == rate or (np.isnan(rate) and np.isnan(value))
+
+
+def test_valid_rates_are_drawn_as_before_when_another_rate_is_negative():
+    app = _app(b_a=(7.0, 100), a_b=(1.0, 100))  # flows in order b->a, a->b
+    app.edges["a", "b"]["avg_packets_per_step"] = -1.0
+
+    np.random.seed(3)
+    app.generate_traffic_for_step(1)
+    np.random.seed(3)
+    expected = np.random.poisson([7.0, 0.0])
+
+    counts = np.bincount(app.generated.flow, minlength=2).tolist()
+    assert counts == expected.tolist()
+
+
+def test_noise_policy_without_a_lower_bound_does_not_break_generation():
+    app = _app(a_b=(0.5, 100))
+    app.rnd.seed(1)
+    jitter = additive_jitter(edge_ranges={"avg_packets_per_step": (-5.0, -4.0)})
+    np.random.seed(0)
+
+    for step in range(1, 4):
+        jitter(app)
+        PacketGenerationEvent()(app, None, None)
+        assert app.current_step == step
+        assert app.num_generated == 0
+    assert app.edges["a", "b"]["avg_packets_per_step"] < 0
 
 
 def test_flow_parameters_are_read_at_every_generation():
