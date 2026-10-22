@@ -111,7 +111,13 @@ def run_eclypse_base(infra: Infrastructure, steps: int, seed: int) -> float:
 
 
 def run_eclypse_net(
-    k: int, total_pkt_per_step: float, pkt_size: int, steps: int, seed: int
+    k: int,
+    total_pkt_per_step: float,
+    pkt_size: int,
+    steps: int,
+    seed: int,
+    generation: PacketGenerationEvent | None = None,
+    routing: RoutingEvent | None = None,
 ) -> dict:
     """Simulate ECLYPSE+NET on a Fat-Tree network with one source host.
 
@@ -122,6 +128,12 @@ def run_eclypse_net(
         pkt_size (int): The packet size, in bytes.
         steps (int): The number of steps.
         seed (int): The seed of the simulation.
+        generation (PacketGenerationEvent | None): The packet generation event,
+            e.g. an instrumented one (see ``stress_test.ipynb``). If None, a new
+            :class:`PacketGenerationEvent`. Defaults to None.
+        routing (RoutingEvent | None): The routing event. If None, a new
+            :class:`RoutingEvent` with steps of :data:`STEP_DURATION_S`. Defaults
+            to None.
 
     Returns:
         dict: The execution time in seconds (``exec_time``) and the number of
@@ -166,8 +178,10 @@ def run_eclypse_net(
         max_steps=steps,
         path=results_path(f"net_{num_nodes}_nodes_{total_pkt_per_step}_pkt_seed{seed}"),
         events=[
-            PacketGenerationEvent(),
-            RoutingEvent(step_duration_s=STEP_DURATION_S),
+            PacketGenerationEvent() if generation is None else generation,
+            RoutingEvent(step_duration_s=STEP_DURATION_S)
+            if routing is None
+            else routing,
             RoutingMetric(),
         ],
         include_default_metrics=False,
