@@ -57,3 +57,18 @@ The metrics of a trial are:
 
 The per-hop telemetry of `RoutingMetric` is not written by default, since it produces
 one row per hop; set `"telemetry": True` in `search_space.py` to write it.
+
+## Step duration and latency
+
+The grid uses steps of 10 ms (`step_duration_s` in `search_space.py`). A packet moves by
+at most one hop per step, and only at the start of a step: a packet that reaches a
+router waits for the next step before being forwarded. When the delay of a hop is much
+shorter than a step, as in these networks, every hop after the first one waits almost
+a whole step, so the end-to-end latency is about `(hops - 1) * 10 ms` plus the delay of
+the last hop. The latency metrics (`latency_*_ms`) therefore measure mostly the time
+resolution of the simulation, not the network: the comparison with ns-3
+(`../ns3_comparison`) shows this difference and how it shrinks with shorter steps.
+
+The execution time metrics are not affected. If the latency matters, use shorter steps
+(e.g. 1 ms or 0.1 ms): the simulated time is then shorter for the same number of steps,
+and a packet needs more steps to reach its destination.

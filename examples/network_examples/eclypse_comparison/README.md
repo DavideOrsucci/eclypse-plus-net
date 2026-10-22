@@ -91,3 +91,17 @@ Every simulation runs in a new process. Its ECLYPSE outputs are written in
 (`enact_s`, `policies_s`, `generation_s`, `routing_s`), the links down after the
 policies (`links_down`), and, for ECLYPSE+NET, the packets generated and the hops
 simulated in the step.
+
+## Step duration
+
+The simulations use steps of 10 ms (`step_duration_s` in `main.py`). A packet moves by
+at most one hop per step, and only at the start of a step, so a packet that reaches a
+router waits for the next step: when the delay of a hop is much shorter than a step, a
+packet takes about `hops - 1` steps to cross the network, and its end-to-end latency is
+about `(hops - 1) * 10 ms`, mostly the time resolution of the simulation (see the
+comparison with ns-3 in `../ns3_comparison`).
+
+This comparison measures execution times, not latencies, so its results stay valid.
+The step duration still shapes the work of the routing event: it decides how many
+packets are in transit at the same time and how the queues fill. Results obtained with
+different step durations should not be compared directly.
