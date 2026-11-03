@@ -5,27 +5,30 @@
 #
 # Experiments:
 #   scalability  scalability_test: Ray Tune grid over topology, size and load
-#   vs-eclypse   eclypse_comparison: base ECLYPSE vs ECLYPSE+NET
+#   vs-eclypse   eclypse_comparison: base ECLYPSE vs ECLYPSE+NET, with update policies
+#   vs-eclypse-stress
+#                eclypse_comparison, stress suite: static network, varying the load
 #   vs-ns3       ns3_comparison: ECLYPSE+NET vs ns-3 (needs ns3-setup)
 #   stress       stress_test.py on Fat-Trees, pinned to one CPU core
-#   all          stress, scalability, vs-eclypse and vs-ns3
+#   all          stress, scalability, vs-eclypse, vs-eclypse-stress and vs-ns3
 #
 # Preparation:
 #   setup        install uv if missing and the dependencies of the project (with Ray Tune)
 #   ns3-setup    download ns-3 and build the program of ns3_comparison
-#   smoke        quick check of scalability, vs-eclypse and vs-ns3 (same as --smoke)
+#   smoke        quick check of scalability, vs-eclypse, vs-eclypse-stress and vs-ns3
 #
 # Options:
-#   --smoke                run the quick version of scalability, vs-eclypse and vs-ns3
-#   -w, --workers N        simulations in parallel in vs-eclypse (default 1: cleanest times)
+#   --smoke                run the quick version of the experiments (not of stress)
+#   -w, --workers N        simulations in parallel in vs-eclypse and vs-eclypse-stress
+#                          (default 1: cleanest times)
 #   -c, --cpus-per-trial N CPUs reserved for each Ray trial in scalability (default 2)
 #   --core N               CPU core used by stress (default: 2, or the first one available)
 #   --ns3-dir DIR          ns-3 folder (default ~/ns-3-dev)
 #   --performance          set the CPU governor to `performance` during the run (sudo)
 #   -n, --dry-run          print the commands without running them
 #   -h, --help             show this help
-#   -- ARGS                pass ARGS to main.py of vs-eclypse or vs-ns3 (one experiment
-#                          only), e.g. -- --routers 64 128 --seed 1
+#   -- ARGS                pass ARGS to main.py of vs-eclypse, vs-eclypse-stress or vs-ns3
+#                          (one experiment only), e.g. -- --routers 64 128 --seed 1
 #
 # Every experiment writes its log to ~/eclypse-sim/logs/<date>_<experiment>.log; the
 # results stay where the experiments write them (~/eclypse-sim/...). If an experiment
@@ -37,6 +40,7 @@
 #   ./run_experiments.sh scalability
 #   ./run_experiments.sh --smoke vs-ns3
 #   ./run_experiments.sh -w 4 vs-eclypse
+#   ./run_experiments.sh vs-eclypse-stress -- --packets-per-step 10 1000
 #   ./run_experiments.sh vs-ns3 -- --routers 16 32 --step-duration-s 0.001
 #   nohup ./run_experiments.sh all > run.out 2>&1 &
 
@@ -80,9 +84,10 @@ while (($#)); do
         -n | --dry-run) DRY_RUN=1 ;;
         -h | --help) usage; exit 0 ;;
         --) shift; EXTRA=("$@"); break ;;
-        setup | ns3-setup | stress | scalability | vs-eclypse | vs-ns3) COMMANDS+=("$1") ;;
-        all) COMMANDS+=(stress scalability vs-eclypse vs-ns3) ;;
-        smoke) SMOKE=1; COMMANDS+=(scalability vs-eclypse vs-ns3) ;;
+        setup | ns3-setup | stress | scalability | vs-eclypse | vs-eclypse-stress | vs-ns3)
+            COMMANDS+=("$1") ;;
+        all) COMMANDS+=(stress scalability vs-eclypse vs-eclypse-stress vs-ns3) ;;
+        smoke) SMOKE=1; COMMANDS+=(scalability vs-eclypse vs-eclypse-stress vs-ns3) ;;
         *) usage >&2; die "unknown argument '$1'" ;;
     esac
     shift
@@ -92,8 +97,9 @@ NS3_DIR="${NS3_DIR/#\~/$HOME}"
 
 # Options after --: only for one experiment that has a command line
 if ((${#EXTRA[@]})); then
-    [[ ${#COMMANDS[@]} -eq 1 && ("${COMMANDS[0]}" == vs-eclypse || "${COMMANDS[0]}" == vs-ns3) ]] ||
-        die "options after -- need exactly one command, vs-eclypse or vs-ns3" \
+    [[ ${#COMMANDS[@]} -eq 1 && "${COMMANDS[0]}" =~ ^(vs-eclypse|vs-eclypse-stress|vs-ns3)$ ]] ||
+        die "options after -- need exactly one command: vs-eclypse, vs-eclypse-stress" \
+            "or vs-ns3" \
             "(scalability reads its grid from scalability_test/search_space.py)"
 fi
 
@@ -246,6 +252,14 @@ cmd_vs_eclypse() {
         "${args[@]}" "${EXTRA[@]}"
 }
 
+cmd_vs_eclypse_stress() {
+    require_uv
+    local args=(--suite stress --workers "$WORKERS")
+    ((SMOKE)) && args+=(--smoke --output "$SIM_DIR/smoke/eclypse_comparison_stress")
+    run "$(label vs-eclypse-stress)" "$HERE/eclypse_comparison" uv run python main.py \
+        "${args[@]}" "${EXTRA[@]}"
+}
+
 cmd_vs_ns3() {
     require_uv
     if ((!DRY_RUN)) && [[ -z "$(ns3_program)" ]]; then
@@ -276,6 +290,7 @@ for command in "${COMMANDS[@]}"; do
         stress) cmd_stress ;;
         scalability) cmd_scalability ;;
         vs-eclypse) cmd_vs_eclypse ;;
+        vs-eclypse-stress) cmd_vs_eclypse_stress ;;
         vs-ns3) cmd_vs_ns3 ;;
     esac
 done

@@ -117,6 +117,15 @@ def _router_links(graph: AssetGraph) -> list[tuple[str, str]]:
     return links
 
 
+def with_policies(config: dict) -> bool:
+    """Return whether the graphs of a trial get update policies.
+
+    Without policies the scenario is static: nodes, links and flows never change,
+    so base ECLYPSE can keep its cached paths for the whole simulation.
+    """
+    return bool(config.get("policies", True))
+
+
 def infrastructure_policies(config: dict) -> list[UpdatePolicy]:
     """Return new update policies for the infrastructure.
 
@@ -131,7 +140,10 @@ def infrastructure_policies(config: dict) -> list[UpdatePolicy]:
 
     Returns:
         list[UpdatePolicy]: The policies; the last one is the :class:`LinkFailures`.
+            Empty if the trial has no policies (see :func:`with_policies`).
     """
+    if not with_policies(config):
+        return []
     return [
         policies.distribution.uniform(
             edge_assets="bandwidth_mbps",
@@ -159,8 +171,11 @@ def application_policies(config: dict) -> list[UpdatePolicy]:
         config (dict): The trial configuration.
 
     Returns:
-        list[UpdatePolicy]: The policies.
+        list[UpdatePolicy]: The policies; empty if the trial has no policies (see
+            :func:`with_policies`).
     """
+    if not with_policies(config):
+        return []
     return [
         policies.workload.diurnal_load(
             amplitude=config["load_amplitude"],
@@ -187,7 +202,8 @@ def build_network(config: dict) -> Network:
 
     Args:
         config (dict): The trial configuration. It uses ``topology``, ``routers``,
-            ``seed``, ``max_queue_size``, ``ba_m`` and ``er_degree_factor``.
+            ``seed``, ``max_queue_size``, ``ba_m``, ``er_degree_factor`` and
+            ``policies``.
 
     Returns:
         Network: The generated network.

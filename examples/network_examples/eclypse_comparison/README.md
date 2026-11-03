@@ -1,14 +1,20 @@
 # Base ECLYPSE vs ECLYPSE+NET
 
 A comparison of the execution time of base ECLYPSE and of ECLYPSE with the Network
-extension, on the same scenarios, changed at every step by the same update policies.
+extension, on the same scenarios. Two suites of scenarios are available:
+
+- **comparison** (default): three topologies and four sizes, changed at every step by
+  the same update policies;
+- **stress**: one topology, four sizes and five loads, on a static network without
+  update policies (see [The stress suite](#the-stress-suite)).
 
 | File | Content |
 |---|---|
 | `scenario.py` | Network, application and update policies of a scenario, and their copies for base ECLYPSE |
 | `experiment.py` | One simulation in one mode, with every phase of every step timed |
-| `main.py` | Runs every scenario in both modes and saves `results.csv` and `steps.csv` |
-| `analyse.ipynb` | Charts of the results |
+| `main.py` | Runs every scenario of a suite in both modes and saves `results.csv` and `steps.csv` |
+| `analyse.ipynb` | Charts of the results of the comparison suite |
+| `analyse_stress.ipynb` | Charts of the results of the stress suite |
 
 ## The scenario
 
@@ -55,6 +61,38 @@ ECLYPSE+NET: the routing event updates the `latency` of the links at every step,
 placement check computes its paths with the `Network` path algorithm. `other` is the
 rest of the simulation time (scheduling of the events).
 
+Inside `enact`, two methods of ECLYPSE are also measured, by wrapping them on their
+class: the placement check (`PlacementManager.audit`) and the computation of one path
+(`Infrastructure._compute_path`), which ECLYPSE repeats for every application link
+whenever its path cache has been invalidated. Any change of a link attribute
+invalidates the cache, including the `latency` updates of ECLYPSE+NET.
+
+## The stress suite
+
+With update policies, the bandwidth of the links changes at every step, so both modes
+discard their cached paths at every step and the scenario changes while it is measured.
+The stress suite removes the policies (`"policies": False`): the network, the placement
+and the flows never change, and the execution time depends only on the size of the
+network and on the load.
+
+| Parameter | Values |
+|---|---|
+| `topology` | `scale_free`: connected by construction, with the same mean degree at every size |
+| `routers` | 64, 128, 256, 512 |
+| `packets_per_step` | 10, 100, 500, 1000, 2000 |
+| `seed` | 3997 |
+
+The other parameters are those of the comparison suite (`STRESS_GRID` and
+`STRESS_FIXED` in `main.py`): 20 scenarios, 40 simulations.
+
+On a static network base ECLYPSE computes the paths of the application links at the
+first step and then reuses them, while ECLYPSE+NET writes the `latency` of the links at
+every step, so ECLYPSE recomputes them at every check: `analyse_stress.ipynb` counts
+these computations. It also shows the execution time against the load, where the time
+goes in each mode, and the cost of the routing event per simulated hop. These are the
+measurements of `../stress_test.ipynb`, on a Barabási–Albert network and with the same
+flows in both modes.
+
 ## Running
 
 From this folder:
@@ -63,34 +101,41 @@ From this folder:
 uv run python main.py --smoke                 # quick check: 32 routers, 20 steps
 uv run python main.py                         # whole grid, one simulation at a time
 uv run python main.py --routers 64 128 --seed 1
+uv run python main.py --suite stress --smoke  # quick check of the stress suite
+uv run python main.py --suite stress          # stress suite
 ```
 
-Options: `--workers` (simulations in parallel, default 1: more workers finish sooner
-but make the times noisier), `--output` (folder of the results, default
-`~/eclypse-sim/eclypse_comparison`), and `--topology`, `--routers`, `--seed` to replace
-the values of the grid in `main.py`. The parameters shared by all the simulations are
-in `FIXED`, in `main.py`.
+Options: `--suite` (`comparison` or `stress`), `--workers` (simulations in parallel,
+default 1: more workers finish sooner but make the times noisier), `--output` (folder
+of the results, default `~/eclypse-sim/eclypse_comparison`, or
+`~/eclypse-sim/eclypse_comparison_stress` for the stress suite), and `--topology`,
+`--routers`, `--packets-per-step`, `--seed` to replace the values of the grid in
+`main.py`. The parameters shared by all the simulations are in `FIXED` and
+`STRESS_FIXED`, in `main.py`.
 
 Every simulation runs in a new process. Its ECLYPSE outputs are written in
-`<output>/trials/<topology>_<routers>_<seed>_<mode>/`.
+`<output>/trials/<parameters>_<mode>/`, e.g. `scale_free_128_3997_net` in the
+comparison suite and `scale_free_128_1000_3997_net` in the stress suite.
 
 ## Outputs
 
 `results.csv` has one row per simulation, with its parameters (`mode`, `topology`,
-`routers`, `seed`) and:
+`routers`, `packets_per_step`, `policies`, `seed`) and:
 
 - **scenario**: `n_routers`, `n_hosts`, `n_links`, `n_services`, `n_flows`;
 - **execution time**: `build_time_s` (scenario, including the copies for base ECLYPSE),
   `sim_time_s` (simulation), `enact_time_s`, `policies_time_s`, `generation_time_s`,
   `routing_time_s`, `other_time_s`, `steps_run`;
+- **inside `enact`**: `audit_time_s` (placement checks), `path_time_s` and `path_calls`
+  (path computations of ECLYPSE);
 - **policies**: `link_failures`, and the final state `end_links`, `end_bandwidth_sum`,
   `end_rate_sum`, `end_size_sum`, equal in the two modes;
 - **traffic**, ECLYPSE+NET only: `generated`, `hops`, `dropped`, `in_transit_at_end`.
 
 `steps.csv` has one row per step of every simulation, with the duration of each phase
-(`enact_s`, `policies_s`, `generation_s`, `routing_s`), the links down after the
-policies (`links_down`), and, for ECLYPSE+NET, the packets generated and the hops
-simulated in the step.
+(`enact_s`, `policies_s`, `generation_s`, `routing_s`), the path computations of the
+`enact` phase (`path_calls`), the links down after the policies (`links_down`), and,
+for ECLYPSE+NET, the packets generated and the hops simulated in the step.
 
 ## Step duration
 
