@@ -89,9 +89,10 @@ On a static network base ECLYPSE computes the paths of the application links at 
 first step and then reuses them, while ECLYPSE+NET writes the `latency` of the links at
 every step, so ECLYPSE recomputes them at every check: `analyse_stress.ipynb` counts
 these computations. It also shows the execution time against the load, where the time
-goes in each mode, and the cost of the routing event per simulated hop. These are the
-measurements of `../stress_test.ipynb`, on a Barabási–Albert network and with the same
-flows in both modes.
+goes in each mode, and the cost of the routing event per simulated hop. These
+measurements replace the former `stress_test.py` and `stress_test.ipynb`, which
+compared ECLYPSE+NET on Fat-Trees with base ECLYPSE without application links: here
+both modes have the same flows.
 
 ## Running
 

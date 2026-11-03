@@ -9,8 +9,7 @@
 #   vs-eclypse-stress
 #                eclypse_comparison, stress suite: static network, varying the load
 #   vs-ns3       ns3_comparison: ECLYPSE+NET vs ns-3 (needs ns3-setup)
-#   stress       stress_test.py on Fat-Trees, pinned to one CPU core
-#   all          stress, scalability, vs-eclypse, vs-eclypse-stress and vs-ns3
+#   all          scalability, vs-eclypse, vs-eclypse-stress and vs-ns3
 #
 # Preparation:
 #   setup        install uv if missing and the dependencies of the project (with Ray Tune)
@@ -18,11 +17,10 @@
 #   smoke        quick check of scalability, vs-eclypse, vs-eclypse-stress and vs-ns3
 #
 # Options:
-#   --smoke                run the quick version of the experiments (not of stress)
+#   --smoke                run the quick version of the experiments
 #   -w, --workers N        simulations in parallel in vs-eclypse and vs-eclypse-stress
 #                          (default 1: cleanest times)
 #   -c, --cpus-per-trial N CPUs reserved for each Ray trial in scalability (default 2)
-#   --core N               CPU core used by stress (default: 2, or the first one available)
 #   --ns3-dir DIR          ns-3 folder (default ~/ns-3-dev)
 #   --performance          set the CPU governor to `performance` during the run (sudo)
 #   -n, --dry-run          print the commands without running them
@@ -55,7 +53,6 @@ NS3_VERSION="ns-3.49"
 SMOKE=0
 WORKERS=1
 CPUS_PER_TRIAL=2
-CORE=""
 NS3_DIR="$HOME/ns-3-dev"
 PERFORMANCE=0
 DRY_RUN=0
@@ -78,15 +75,14 @@ while (($#)); do
         --smoke) SMOKE=1 ;;
         -w | --workers) WORKERS="${2:?missing value of $1}"; shift ;;
         -c | --cpus-per-trial) CPUS_PER_TRIAL="${2:?missing value of $1}"; shift ;;
-        --core) CORE="${2:?missing value of $1}"; shift ;;
         --ns3-dir) NS3_DIR="${2:?missing value of $1}"; shift ;;
         --performance) PERFORMANCE=1 ;;
         -n | --dry-run) DRY_RUN=1 ;;
         -h | --help) usage; exit 0 ;;
         --) shift; EXTRA=("$@"); break ;;
-        setup | ns3-setup | stress | scalability | vs-eclypse | vs-eclypse-stress | vs-ns3)
+        setup | ns3-setup | scalability | vs-eclypse | vs-eclypse-stress | vs-ns3)
             COMMANDS+=("$1") ;;
-        all) COMMANDS+=(stress scalability vs-eclypse vs-eclypse-stress vs-ns3) ;;
+        all) COMMANDS+=(scalability vs-eclypse vs-eclypse-stress vs-ns3) ;;
         smoke) SMOKE=1; COMMANDS+=(scalability vs-eclypse vs-eclypse-stress vs-ns3) ;;
         *) usage >&2; die "unknown argument '$1'" ;;
     esac
@@ -217,23 +213,6 @@ cmd_ns3_setup() {
         run ns3-build "$NS3_DIR" ./ns3 build eclypse_scenario
 }
 
-cmd_stress() {
-    require_uv
-    local core="$CORE"
-    if [[ -z "$core" ]] && command -v taskset >/dev/null; then
-        # Core 2, or the first core this process may use
-        core=2
-        taskset -c "$core" true 2>/dev/null ||
-            core="$(taskset -cp $$ | sed 's/.*: *//; s/[-,].*//')"
-    fi
-    if command -v taskset >/dev/null && taskset -c "$core" true 2>/dev/null; then
-        run stress "$HERE" taskset -c "$core" uv run python stress_test.py
-    else
-        echo "Warning: cannot pin stress_test.py to core ${core:-?}; running it unpinned." >&2
-        run stress "$HERE" uv run python stress_test.py
-    fi
-}
-
 cmd_scalability() {
     require_uv
     if ((SMOKE)); then
@@ -287,7 +266,6 @@ for command in "${COMMANDS[@]}"; do
     case "$command" in
         setup) cmd_setup ;;
         ns3-setup) cmd_ns3_setup ;;
-        stress) cmd_stress ;;
         scalability) cmd_scalability ;;
         vs-eclypse) cmd_vs_eclypse ;;
         vs-eclypse-stress) cmd_vs_eclypse_stress ;;
