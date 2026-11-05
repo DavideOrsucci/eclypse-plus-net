@@ -88,9 +88,7 @@ def test_infrastructure_path_custom_cost_attr_controls_cache_refresh(
     assert sample_infrastructure._costs == {}  # pylint: disable=protected-access
 
     calls = []
-    original_compute_path = (
-        sample_infrastructure._compute_path
-    )  # pylint: disable=protected-access
+    original_compute_path = sample_infrastructure._compute_path  # pylint: disable=protected-access
 
     def recompute_spy(source: str, target: str):
         calls.append((source, target))
@@ -129,8 +127,7 @@ def test_infrastructure_direct_node_path_attr_updates_invalidate_cached_processi
 
     assert sample_infrastructure._paths != {}  # pylint: disable=protected-access
     assert (
-        sample_infrastructure._processing_times
-        == {}  # pylint: disable=protected-access
+        sample_infrastructure._processing_times == {}  # pylint: disable=protected-access
     )
     assert sample_infrastructure.processing_time("edge-a", "edge-b") == 10
 
@@ -188,6 +185,7 @@ def test_infrastructure_requires_path_aggregators_for_custom_edge_assets():
         Infrastructure(
             edge_assets={"bandwidth": Additive(0, 10)},
             include_default_assets=False,
+            resource_init="min",
         )
 
     class PretendingAggregators(dict):
@@ -198,6 +196,7 @@ def test_infrastructure_requires_path_aggregators_for_custom_edge_assets():
         Infrastructure(
             edge_assets={"bandwidth": Additive(0, 10)},
             include_default_assets=False,
+            resource_init="min",
             path_assets_aggregators=PretendingAggregators(),
         )
 

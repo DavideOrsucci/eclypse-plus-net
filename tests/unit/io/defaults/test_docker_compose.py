@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
-from eclypse.graph import Application
 from eclypse.io import (
     DockerComposeContext,
     dump_application,
     load_application,
 )
 from eclypse.io.defaults.docker_compose import DockerComposeImporter
+
+if TYPE_CHECKING:
+    from eclypse.graph import Application
 
 
 def test_docker_compose_application_round_trip(

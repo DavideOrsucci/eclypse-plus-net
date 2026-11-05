@@ -51,25 +51,8 @@ exclude_patterns = [
     "_build",
     "Thumbs.db",
     ".DS_Store",
-    "README.md",
-    "source/api/reference/graph/application/Application/"
-    "eclypse.graph.application.Application.has_logic.rst",
-    "source/api/reference/graph/infrastructure/Infrastructure/"
-    "eclypse.graph.infrastructure.Infrastructure.contains.rst",
-    "source/api/reference/graph/infrastructure/Infrastructure/"
-    "eclypse.graph.infrastructure.Infrastructure.has_strategy.rst",
-    "source/api/reference/workflow/trigger/bucket/TriggerBucket/"
-    "eclypse.workflow.trigger.bucket.TriggerBucket.init.rst",
-    "source/api/reference/workflow/trigger/cascade/RandomCascadeTrigger/"
-    "eclypse.workflow.trigger.cascade.RandomCascadeTrigger.init.rst",
-    "source/api/reference/workflow/trigger/trigger/RandomTrigger/"
-    "eclypse.workflow.trigger.trigger.RandomTrigger.init.rst",
-    "source/api/reference/workflow/trigger/trigger/ScheduledTrigger/"
-    "eclypse.workflow.trigger.trigger.ScheduledTrigger.init.rst",
-    "source/api/reference/workflow/trigger/trigger/Trigger/"
-    "eclypse.workflow.trigger.trigger.Trigger.init.rst",
-    "source/api/reference/workflow/event/decorator/"
-    "eclypse.workflow.event.decorator.event.rst",
+    "images/*.tiff",
+    "images/legacy",
 ]
 suppress_warnings = ["toc.not_included"]
 
@@ -87,11 +70,15 @@ autodoc_default_options = {"undoc-members": True}
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
 html_theme = "pydata_sphinx_theme"
-html_logo = "_static/images/light.png"
+html_logo = "_static/images/logo.png"
 
 html_static_path = ["_static"]
 html_extra_path = ["_static/landing"]
-html_css_files = ["css/custom.css", "css/home.css"]
+html_css_files = [
+    "https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap",
+    "css/custom.css",
+    "css/home.css",
+]
 
 html_context = {
     "github_url": "https://github.com",
@@ -101,7 +88,17 @@ html_context = {
     "doc_path": "docs",
 }
 
-html_additional_pages = {"index": "index.html"}
+
+def landing_page_template(app, pagename, templatename, context, doctree):
+    """Use the landing template whenever Sphinx rebuilds the root document."""
+    if pagename == "index":
+        return "index.html"
+    return None
+
+
+def setup(app):
+    app.connect("html-page-context", landing_page_template)
+
 
 favicons = [
     {
@@ -166,8 +163,8 @@ html_theme_options = {
     "logo": {
         "text": "ECLYPSE",
         "alt_text": "ECLYPSE - Home",
-        "image_dark": "_static/images/dark.png",
-        "image_light": "_static/images/light.png",
+        "image_dark": "_static/images/logo.png",
+        "image_light": "_static/images/logo.png",
     },
 }
 source_suffix = [".rst", ".pyi"]

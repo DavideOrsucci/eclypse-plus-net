@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import networkx as nx
 import pytest
 
-from eclypse.graph import (
-    Application,
-    Infrastructure,
-)
 from eclypse.graph.assets import Additive
 from eclypse.io import (
     InfrastructureContext,
@@ -19,6 +16,12 @@ from eclypse.io import (
 )
 from eclypse.io.defaults.networkx import NetworkXImporter
 from eclypse.io.graphs import graph_from_networkx
+
+if TYPE_CHECKING:
+    from eclypse.graph import (
+        Application,
+        Infrastructure,
+    )
 
 
 class DummyNetworkXImporter(NetworkXImporter):
@@ -56,6 +59,7 @@ def test_graph_only_import_can_take_asset_schema_from_context():
         node_assets={"temperature": Additive(0, 100)},
         edge_assets={},
         include_default_assets=False,
+        resource_init="min",
     )
     loaded = graph_from_networkx(
         data,

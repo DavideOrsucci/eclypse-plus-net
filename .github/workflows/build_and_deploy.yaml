@@ -2,37 +2,30 @@ name: Build and Deploy to PyPI
 
 on:
   workflow_dispatch:
+  pull_request:
   push:
+    branches:
+      - main
     tags:
       - "*"
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  build_and_deploy:
+  build:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Source Code
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           python-version: "3.11"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
           enable-cache: true
-
-      - name: Install dependencies
-        run: |
-          uv sync --group dev --group deploy --no-install-project
-
-      - name: Check formatting and linting
-        run: |
-          uv run --no-sync isort --check-only eclypse
-          uv run --no-sync ruff check
-          uv run --no-sync ruff format --check
 
       - name: Build wheel
         run: |
@@ -40,12 +33,106 @@ jobs:
 
       - name: Verify distribution
         run: |
-          uv run --no-sync twine check --strict dist/*
+          uvx twine check --strict dist/*
+
+      - name: Install the wheel in a clean environment
+        run: |
+          uv venv "$RUNNER_TEMP/smoke"
+          uv pip install --python "$RUNNER_TEMP/smoke" dist/*.whl
+          "$RUNNER_TEMP/smoke/bin/python" -c "import eclypse"
+
+      - name: Upload distribution
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+
+  lint:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Run pre-commit hooks
+        run: |
+          uv run --locked --only-group dev pre-commit run --all-files
+
+  tests:
+    if: startsWith(github.ref, 'refs/tags/')
+    uses: ./.github/workflows/tests.yaml
+    secrets: inherit
+
+  examples:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    env:
+      RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: |
+          uv sync --locked --no-default-groups --group test
+
+      # the other examples are long experiments or need extra services
+      - name: Run examples
+        run: |
+          for example in echo.main off_the_shelf.main io_round_trip.main sock_shop.mpi sock_shop.rest; do
+            echo "::group::$example"
+            uv run --no-sync python -m "examples.$example"
+            echo "::endgroup::"
+          done
+
+  deploy:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build, lint, tests, examples]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download distribution
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
 
       - name: Upload to PyPI
-        # publish only on tags
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN_PUBLIC }}
         run: |
-          uv publish -v
+          uv publish -v --trusted-publishing always
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # this version's section of the changelog, without its heading
+          awk -v v="$GITHUB_REF_NAME" '
+            /^## / { found = ($2 == v); next }
+            found
+          ' CHANGELOG.md > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/*.whl \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from eclypse.report.metrics import metric
 from eclypse.report.metrics.defaults import (
     SimulationTime,
     StepNumber,
@@ -24,7 +25,6 @@ from eclypse.report.metrics.defaults import (
     seed,
     step_result,
 )
-from eclypse.report.metrics import metric
 from eclypse.utils.constants import (
     DRIVING_EVENT,
     RND_SEED,
@@ -73,6 +73,7 @@ def test_default_metrics_compute_expected_values(mapped_placement, placement_vie
         )
         == 10
     )
+
 
 def test_simulation_metric_helpers_and_default_metric_list(
     monkeypatch,

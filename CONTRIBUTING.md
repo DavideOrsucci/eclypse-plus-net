@@ -5,12 +5,13 @@ We're glad you're considering contributing to ECLYPSE. Before you proceed, pleas
 ## Table of Contents
 
 - [Dev Containers](#dev-containers)
+- [Setup](#setup)
 - [Pull Requests](#pull-requests)
 - [Conventional Commits](#conventional-commits)
-- [Code Formatting](#code-formatting)
-- [Linting](#linting)
 - [Testing](#testing)
+- [Documentation](#documentation)
 - [Pre-commit Hooks](#pre-commit-hooks)
+- [Releasing](#releasing)
 
 ## Dev Containers
 
@@ -20,6 +21,16 @@ configuration.
 
 If you use VS Code Dev Containers or GitHub Codespaces, you can rely on that
 setup for a reproducible contributor environment.
+
+## Setup
+
+The project is managed with [uv](https://docs.astral.sh/uv/). Install it, then run from the repository root:
+
+```bash
+make setup
+```
+
+This installs the package and all the development, test and docs dependencies in `.venv`, at the versions pinned in `uv.lock`.
 
 ## Pull Requests
 
@@ -60,43 +71,6 @@ To contribute to this project, follow these steps:
 
 We enforce the usage of conventional commits in this repository. Please ensure that your commit messages follow the conventional commits format. You can find more information about conventional commits [here](https://www.conventionalcommits.org/en/v1.0.0/).
 
-## Code Formatting
-
-We use the following tools for code formatting:
-
-- [Ruff](https://github.com/astral-sh/ruff): for linting and formatting Python code.
-- [isort](https://github.com/PyCQA/isort): for sorting and organizing Python imports (*Ruff could also handle this, but we use some standards that are not already ported to Ruff*).
-
-Please make sure that your code adheres to these formatting standards before submitting a pull request.
-You can check and format your code automatically with:
-
-```bash
-isort eclypse
-ruff check
-ruff format
-```
-
-## Linting
-
-Linting in this project is handled entirely by [Ruff](https://github.com/astral-sh/ruff).
-
-Ruff is an extremely fast Python linter and formatter that replaces multiple traditional tools (such as flake8, pycodestyle, pyflakes, pydocstyle, and others) with a single, unified command-line interface.
-
-Before submitting your pull request, ensure that your code passes all linting checks defined in the `.ruff.toml` file, by running:
-
-```bash
-ruff check
-```
-
-If you want Ruff to automatically fix all fixable issues, you can run:
-
-```bash
-ruff check --fix
-```
-
-Ruff will detect and correct most common style, import, and docstring issues automatically.
-Please make sure that all warnings and errors are resolved before committing your changes.
-
 ## Testing
 
 We use `pytest` for the test suite.
@@ -104,32 +78,42 @@ We use `pytest` for the test suite.
 Useful command:
 
 ```bash
-pytest
+uv run pytest
+```
+
+## Documentation
+
+The documentation is built with Sphinx, treating warnings as errors:
+
+```bash
+make docs
+```
+
+The pages are written to `docs/_build/html`. To find classes missing from the documentation, run:
+
+```bash
+uv run --group docs make -C docs coverage
 ```
 
 ## Pre-commit Hooks
 
-We provide pre-commit hooks to automate formatting and linting checks. Follow the steps below to install and run them:
+Formatting and linting run as pre-commit hooks, the same ones pre-commit.ci runs on every pull request:
 
-1. **Install pre-commit:**
+- [Ruff](https://github.com/astral-sh/ruff): linting (rules in the `[tool.ruff]` section of `pyproject.toml`) and formatting.
+- [isort](https://github.com/PyCQA/isort): import sorting (*Ruff could also handle this, but we use some standards that are not already ported to Ruff*).
+- [mypy](https://mypy-lang.org/): type checking of the `eclypse` package.
 
-    ```bash
-    pip install pre-commit
-    ```
+Follow the steps below to install and run them:
 
-2. **Install the hooks:**
-
-    ```bash
-    pre-commit install
-    ```
-
-3. **Run pre-commit checks manually (optional):**
+1. **Install the hooks** (pre-commit is installed by `make setup`):
 
     ```bash
-    pre-commit run -a
+    uv run pre-commit install
     ```
 
-    Alternatively, you can use the Makefile rule:
+    This also installs the hooks that check commit messages and, before pushing, the commits on your branch.
+
+2. **Run pre-commit checks manually (optional):**
 
     ```bash
     make check
@@ -138,3 +122,25 @@ We provide pre-commit hooks to automate formatting and linting checks. Follow th
 This will execute all pre-commit hooks (formatting and linting) across your repository. Any issues found will be reported, and you'll need to address them before committing your changes.
 
 By following these steps, you ensure that your contributions maintain consistency and quality across the codebase. If you encounter any issues or have questions about the setup, feel free to reach out for assistance.
+
+## Releasing
+
+Releases are made by maintainers, who can push to `main` and create tags.
+
+1. On an up-to-date `main`, run:
+
+    ```bash
+    make bump
+    ```
+
+    Commitizen picks the next version from the commits since the last tag (`fix` → patch, `feat` → minor, breaking change → major; `make patch` forces a patch), updates the version in `pyproject.toml`, `uv.lock`, `eclypse/__init__.py` and `CITATION.cff`, adds the release to `CHANGELOG.md`, commits it as `chore(release): bump version X → Y` and creates the tag.
+
+2. Push the commit and the tag:
+
+    ```bash
+    git push --follow-tags
+    ```
+
+3. The tag starts the `Build and Deploy to PyPI` workflow. It builds and checks the wheel, runs the pre-commit hooks, the tests and the quick examples, then publishes to PyPI through trusted publishing (`pypi` environment) and creates the GitHub Release with the changelog and the wheel.
+
+If the workflow fails before publishing, fix the problem on `main` and release the next patch version. A version published to PyPI can never be replaced: a broken release is fixed by a new patch release, and can be yanked on PyPI so that it is no longer installed by default.

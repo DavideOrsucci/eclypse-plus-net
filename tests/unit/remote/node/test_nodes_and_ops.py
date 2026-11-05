@@ -7,10 +7,10 @@ from typing import Any
 
 import pytest
 
-from eclypse.remote.node.node import RemoteNode
-from eclypse.remote.node.ops_thread import RemoteOpsThread
 from eclypse.remote.communication.mpi import EclypseMPI
 from eclypse.remote.communication.rest import EclypseREST
+from eclypse.remote.node.node import RemoteNode
+from eclypse.remote.node.ops_thread import RemoteOpsThread
 from eclypse.remote.utils import (
     RemoteOps,
     ResponseCode,
@@ -69,9 +69,7 @@ async def test_remote_node_build_entrypoints_and_actor_cache(monkeypatch, dummy_
     loop = asyncio.get_running_loop()
     actor_calls: list[str] = []
 
-    monkeypatch.setattr(
-        "eclypse.remote.node.node.asyncio.get_event_loop", lambda: loop
-    )
+    monkeypatch.setattr("eclypse.remote.node.node.asyncio.get_event_loop", lambda: loop)
     monkeypatch.setattr("eclypse.remote.node.node.RemoteOpsThread", FakeOpsThread)
     monkeypatch.setattr(
         "eclypse.remote.node.node.ThreadPoolExecutor",
