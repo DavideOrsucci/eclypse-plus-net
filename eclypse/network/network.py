@@ -680,6 +680,9 @@ class Network(Infrastructure):
             destination was unreachable, e.g. removed, down or disconnected.
         lost_packets (int): Total number of packets discarded because they were
             on a node that was removed or is down, or travelling towards it.
+        local_packets (int): Total number of packets delivered without crossing any
+            link, because their source and destination are the same node (e.g. two
+            services placed on the same host).
         _app_ids (dict[str, int]): Index of every application whose packets have
             entered the network, in order of first appearance.
         _packet_counter (int): Number of packet identifiers allocated so far.
@@ -753,6 +756,7 @@ class Network(Infrastructure):
         self.stranded_packets = 0
         self.unroutable_packets = 0
         self.lost_packets = 0
+        self.local_packets = 0
 
     # ------------------------------------------------------------------ topology
 
@@ -1196,6 +1200,10 @@ class Network(Infrastructure):
         reach their destination are returned, the others are appended to
         :attr:`in_transit`.
 
+        Packets already on their destination node (source and destination services
+        placed on the same node) do not cross any link: they are returned at once,
+        unchanged and without telemetry rows, and counted in :attr:`local_packets`.
+
         Args:
             batch (PacketBatch): The packets to forward, in processing order.
             current_time (float): Current simulation time, in seconds.
@@ -1203,10 +1211,10 @@ class Network(Infrastructure):
         Returns:
             PacketBatch: The packets delivered to their destination by this hop.
         """
-        batch, link_of = self._route(batch)
+        batch, link_of, local = self._route(batch)
         m = len(batch)
         if m == 0:
-            return PacketBatch.empty()
+            return local
 
         # Group the packets by link, keeping the processing order inside a link
         perm = np.argsort(link_of, kind="stable")
@@ -1254,27 +1262,35 @@ class Network(Infrastructure):
         moved.arrival = hops["arrival"][inv][acc]
         delivered = moved.cur == moved.dst
         self.in_transit = PacketBatch.concat([self.in_transit, moved.take(~delivered)])
-        return moved.take(delivered)
+        return PacketBatch.concat([local, moved.take(delivered)])
 
-    def _route(self, batch: PacketBatch) -> tuple[PacketBatch, np.ndarray]:
+    def _route(self, batch: PacketBatch) -> tuple[PacketBatch, np.ndarray, PacketBatch]:
         """Find the next-hop link of every packet.
 
         Packets located on a node that was removed or is down are discarded and
-        counted in :attr:`lost_packets` (see :meth:`_discard_lost`). Packets whose
-        destination is unreachable are discarded and counted in
-        :attr:`unroutable_packets`, with one warning per destination.
+        counted in :attr:`lost_packets` (see :meth:`_discard_lost`). Packets already
+        on their destination node need no link: they are set apart and counted in
+        :attr:`local_packets`. Packets whose destination is unreachable are
+        discarded and counted in :attr:`unroutable_packets`, with one warning per
+        destination.
 
         Args:
             batch (PacketBatch): The packets to route.
 
         Returns:
-            tuple[PacketBatch, np.ndarray]: The routable packets and the position in
-                ``_link_list`` of their next-hop link.
+            tuple[PacketBatch, np.ndarray, PacketBatch]: The routable packets, the
+                position in ``_link_list`` of their next-hop link, and the packets
+                already on their destination node.
         """
         self._ensure_tables()
         if not len(batch):
-            return batch, np.empty(0, dtype=np.int64)
+            return batch, np.empty(0, dtype=np.int64), PacketBatch.empty()
         batch = self._discard_lost(batch)
+        here = batch.cur == batch.dst
+        local = batch.take(here)
+        if len(local):
+            self.local_packets += len(local)
+            batch = batch.take(~here)
         link_of = self._fwd[batch.cur, batch.dst]  # type: ignore[index]
         no_route = link_of < 0
         if no_route.any():
@@ -1286,7 +1302,7 @@ class Network(Infrastructure):
                 )
             batch = batch.take(~no_route)
             link_of = link_of[~no_route]
-        return batch, link_of
+        return batch, link_of, local
 
     def _discard_lost(self, batch: PacketBatch) -> PacketBatch:
         """Discard the packets located on a node that was removed or is down.

@@ -146,6 +146,22 @@ def test_packets_of_unplaced_services_are_discarded(line_network):
 
 
 @pytest.mark.usefixtures("seeded")
+def test_services_on_the_same_host_exchange_packets_locally(line_network, line_app):
+    app, _ = line_app
+    placement = StubPlacement({"sa": "A", "sb": "A"})
+
+    PacketGenerationEvent()(app, placement, line_network)
+    generated = app.num_generated
+    RoutingEvent(step_duration_s=0.001).route([(app, placement)], line_network)
+
+    assert generated > 0
+    assert line_network.local_packets == generated
+    assert line_network.unroutable_packets == 0
+    assert line_network.step_columns["packet_id"] == []
+    assert len(line_network.in_transit) == 0
+
+
+@pytest.mark.usefixtures("seeded")
 def test_packets_generated_on_a_router_are_discarded_with_a_warning(
     line_network, line_app, net_logger
 ):

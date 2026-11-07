@@ -287,6 +287,56 @@ def test_take_router_batches_counts_the_packets_on_a_removed_router(line_network
     assert line_network.stranded_packets == 0
 
 
+# ---------------------------------------------------------------- local delivery
+
+
+def test_packets_already_on_their_destination_are_delivered_locally(
+    line_network, net_logger
+):
+    batch = make_batch(line_network, "A", "A", 3, arrival=0.5)
+
+    delivered, cols = _forward(line_network, batch)
+
+    assert delivered.id.tolist() == [1, 2, 3]
+    assert delivered.cur.tolist() == [line_network.node_index("A")] * 3
+    assert delivered.hop.tolist() == [0, 0, 0]
+    assert delivered.arrival.tolist() == [0.5, 0.5, 0.5]
+    # No link is crossed: no telemetry, no queue, no other counter
+    assert cols["packet_id"] == []
+    assert all(link.queue_length == 0 for link in line_network._links.values())
+    assert len(line_network.in_transit) == 0
+    assert line_network.local_packets == 3
+    assert line_network.unroutable_packets == 0
+    assert line_network.dropped_packets == 0
+    assert net_logger.messages("warning") == []
+
+
+def test_local_packets_are_returned_with_the_delivered_ones(line_network):
+    batch = PacketBatch.concat(
+        [
+            make_batch(line_network, "A", "B", 1, cur="R", prev="A", hop=1, first_id=1),
+            make_batch(line_network, "A", "A", 2, first_id=2),
+        ]
+    )
+
+    delivered, cols = _forward(line_network, batch)
+
+    assert delivered.id.tolist() == [2, 3, 1]
+    assert cols["packet_id"] == [1]
+    assert line_network.local_packets == 2
+
+
+def test_local_packets_on_a_node_that_is_down_are_lost(line_network):
+    batch = make_batch(line_network, "A", "A", 2)
+
+    line_network.nodes["A"]["availability"] = 0
+    delivered, _ = _forward(line_network, batch)
+
+    assert len(delivered) == 0
+    assert line_network.lost_packets == 2
+    assert line_network.local_packets == 0
+
+
 # ---------------------------------------------------------------- router batches
 
 
