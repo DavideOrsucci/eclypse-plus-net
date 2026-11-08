@@ -133,16 +133,86 @@ def test_routing_event_updates_the_link_latencies(line_network, line_app):
 
 
 @pytest.mark.usefixtures("seeded")
-def test_packets_of_unplaced_services_are_discarded(line_network):
+def test_packets_of_unplaced_services_are_discarded_and_counted(
+    line_network, net_logger
+):
     app = NetworkApplication("app")
     for service in ("sa", "ghost"):
         app.add_node(service, cpu=1, ram=1)
     app.add_edge("sa", "ghost", avg_packets_per_step=20.0)
+    placement = StubPlacement({"sa": "A"})
 
-    cols = _run_step(app, StubPlacement({"sa": "A"}), line_network)
+    PacketGenerationEvent()(app, placement, line_network)
+    generated = app.num_generated
+    RoutingEvent(step_duration_s=0.001).route([(app, placement)], line_network)
 
-    assert cols["packet_id"] == []
+    assert generated > 0
+    assert line_network.step_columns["packet_id"] == []
     assert len(line_network.in_transit) == 0
+    assert line_network.unplaced_packets == generated
+    warnings = net_logger.messages("warning")
+    assert len(warnings) == 1
+    assert f"{generated} packets of application 'app'" in warnings[0]
+    assert warnings[0].endswith("ghost")
+
+
+@pytest.mark.usefixtures("seeded")
+def test_an_application_without_placement_loses_its_packets_with_one_warning(
+    line_network, net_logger
+):
+    app = NetworkApplication("app")
+    for service in ("s1", "s2", "s3"):
+        app.add_node(service, cpu=1, ram=1)
+    app.add_edge("s1", "s2", avg_packets_per_step=10.0)
+    app.add_edge("s2", "s3", avg_packets_per_step=10.0)
+    placement = StubPlacement({})  # e.g. the step after ECLYPSE reset the placement
+
+    PacketGenerationEvent()(app, placement, line_network)
+    generated = app.num_generated
+    RoutingEvent(step_duration_s=0.001).route([(app, placement)], line_network)
+
+    assert generated > 0
+    assert line_network.unplaced_packets == generated
+    assert line_network.router_source_packets == 0
+    warnings = net_logger.messages("warning")
+    assert len(warnings) == 1  # one per application and step, not one per flow
+    assert warnings[0].endswith("s1, s2, s3")
+
+
+@pytest.mark.usefixtures("seeded")
+def test_services_mapped_to_a_node_outside_the_network_are_unplaced(
+    line_network, line_app
+):
+    app, _ = line_app
+    placement = StubPlacement({"sa": "A", "sb": "nowhere"})
+
+    PacketGenerationEvent()(app, placement, line_network)
+    generated = app.num_generated
+    RoutingEvent(step_duration_s=0.001).route([(app, placement)], line_network)
+
+    assert generated > 0
+    assert line_network.unplaced_packets == generated
+
+
+@pytest.mark.usefixtures("seeded")
+def test_placed_flows_are_injected_while_unplaced_ones_are_counted(line_network):
+    app = NetworkApplication("app")
+    for service in ("sa", "sb", "ghost"):
+        app.add_node(service, cpu=1, ram=1)
+    app.add_edge("sa", "sb", avg_packets_per_step=10.0)
+    app.add_edge("sa", "ghost", avg_packets_per_step=10.0)
+    placement = StubPlacement({"sa": "A", "sb": "B"})
+
+    PacketGenerationEvent()(app, placement, line_network)
+    to_ghost = int(
+        (app.generated.flow == app.generated.flows.index(("sa", "ghost", 1500))).sum()
+    )
+    generated = app.num_generated
+    RoutingEvent(step_duration_s=0.001).route([(app, placement)], line_network)
+
+    assert 0 < to_ghost < generated
+    assert line_network.unplaced_packets == to_ghost
+    assert len(line_network.step_columns["packet_id"]) == generated - to_ghost
 
 
 @pytest.mark.usefixtures("seeded")
@@ -168,10 +238,14 @@ def test_packets_generated_on_a_router_are_discarded_with_a_warning(
     app, _ = line_app
     placement = StubPlacement({"sa": "R", "sb": "B"})
 
-    cols = _run_step(app, placement, line_network)
+    PacketGenerationEvent()(app, placement, line_network)
+    generated = app.num_generated
+    RoutingEvent(step_duration_s=0.001).route([(app, placement)], line_network)
 
-    assert cols["packet_id"] == []
-    assert any("Router" in message for message in net_logger.messages("warning"))
+    assert generated > 0
+    assert line_network.step_columns["packet_id"] == []
+    assert line_network.router_source_packets == generated
+    assert any("HostOnlyStrategy" in m for m in net_logger.messages("warning"))
 
 
 @pytest.mark.usefixtures("seeded")
