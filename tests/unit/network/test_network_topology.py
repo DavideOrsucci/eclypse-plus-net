@@ -243,6 +243,15 @@ def test_node_index_is_stable_and_registers_new_names(line_network):
     assert line_network.node_name(-1) is None
 
 
+def test_node_index_without_register_does_not_assign_an_index(line_network):
+    a = line_network.node_index("A")
+
+    assert line_network.node_index("A", register=False) == a
+    assert line_network.node_index("Z", register=False) == -1
+    assert line_network.node_index("Z", register=False) == -1
+    assert line_network.node_name(line_network.node_index("Z")) == "Z"
+
+
 def test_node_indices_are_not_reused_after_removal(line_network):
     line_network.build_routing_tables()
     b = line_network.node_index("B")
@@ -255,3 +264,61 @@ def test_node_indices_are_not_reused_after_removal(line_network):
     assert line_network.node_index("B") == b
     assert line_network.node_index("R_new") not in (b, r)
     assert line_network.node_name(r) == "R"
+
+
+# ---------------------------------------------------------------- read-only API
+
+
+def test_next_hop_follows_the_minimum_cost_path():
+    net = _diamond()
+
+    assert net.next_hop("A", "B") == "R2"
+    assert net.next_hop("R1", "B") == "B"
+    assert net.next_hop("B", "A") is None  # the links are one-way
+    assert net.next_hop("A", "A") is None
+    assert net.next_hop("A", "missing") is None
+    assert net.next_hop("missing", "B") is None
+
+
+def test_next_hop_reflects_topology_and_availability_changes():
+    net = _diamond()
+    assert net.next_hop("A", "B") == "R2"
+
+    net.nodes["R2"]["availability"] = 0.0
+    assert net.next_hop("A", "B") == "R1"
+    assert net.next_hop("R2", "B") is None
+
+    net.nodes["R2"]["availability"] = 1.0
+    net.remove_edge("A", "R1")
+    assert net.next_hop("A", "B") == "R2"
+    net.remove_edge("A", "R2")
+    assert net.next_hop("A", "B") is None
+
+
+def test_next_hop_of_a_node_registered_after_the_tables_were_built(line_network):
+    line_network.ensure_routing_tables()
+    line_network.node_index("Z")
+
+    assert line_network.next_hop("A", "Z") is None
+    assert line_network.next_hop("A", "B") == "R"
+
+
+def test_host_and_router_ranks_follow_the_role_order(line_network):
+    line_network.ensure_routing_tables()
+    hosts, routers = line_network.host_ranks, line_network.router_ranks
+
+    for rank, host in enumerate(line_network.hosts):
+        assert hosts[line_network.node_index(host)] == rank
+        assert routers[line_network.node_index(host)] == -1
+    for rank, router in enumerate(line_network.routers):
+        assert routers[line_network.node_index(router)] == rank
+        assert hosts[line_network.node_index(router)] == -1
+
+
+def test_host_and_router_ranks_are_read_only(line_network):
+    line_network.ensure_routing_tables()
+
+    with pytest.raises(ValueError, match="read-only"):
+        line_network.host_ranks[0] = 5
+    with pytest.raises(ValueError, match="read-only"):
+        line_network.router_ranks[0] = 5

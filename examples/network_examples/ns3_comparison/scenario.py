@@ -200,19 +200,13 @@ def export_for_ns3(net: Network, packets: list[tuple], folder: Path):
             raise ValueError(f"Host {host} must have exactly one link.")
 
     # Forwarding tables, as built by Network for the simulation
-    net._ensure_tables()  # pylint: disable=protected-access
-    fwd = net._fwd  # pylint: disable=protected-access
-    link_list = net._link_list  # pylint: disable=protected-access
     destinations = sorted({p[2] for p in packets})
     routes = []
     for node in net.nodes:
-        u = net.node_index(node)
         for dst in destinations:
-            if dst == node:
-                continue
-            link = fwd[u, net.node_index(dst)]
-            if link >= 0:
-                routes.append((node, dst, link_list[link].v))
+            nxt = net.next_hop(node, dst)
+            if nxt is not None:
+                routes.append((node, dst, nxt))
     write_csv(folder / "routes.csv", ["node", "destination", "next_hop"], routes)
 
     write_csv(

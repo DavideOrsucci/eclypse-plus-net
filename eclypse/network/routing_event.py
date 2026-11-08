@@ -100,7 +100,7 @@ class RoutingEvent(EclypseEvent):
             return PacketBatch.empty()
 
         flows = generated.flows
-        host_rank = infra._host_rank  # pylint: disable=protected-access
+        host_rank = infra.host_ranks
         flow_src, flow_dst = self._resolve_flows(app, generated, placement, infra)
 
         flow = generated.flow
@@ -151,9 +151,8 @@ class RoutingEvent(EclypseEvent):
                 node of every flow, or -1 for the discarded flows.
         """
         flows = generated.flows
-        node_ids = infra._node_ids  # pylint: disable=protected-access
-        host_rank = infra._host_rank  # pylint: disable=protected-access
-        router_rank = infra._router_rank  # pylint: disable=protected-access
+        host_rank = infra.host_ranks
+        router_rank = infra.router_ranks
 
         placement_cache: dict[str, int] = {}
 
@@ -161,7 +160,7 @@ class RoutingEvent(EclypseEvent):
             if service not in placement_cache:
                 try:
                     node = placement.service_placement(service_id=service)
-                    idx = node_ids.get(node, -1)
+                    idx = infra.node_index(node, register=False)
                 except KeyError:
                     idx = -1
                 placement_cache[service] = idx
@@ -264,7 +263,7 @@ class RoutingEvent(EclypseEvent):
         """
         self.current_step = self.current_step + 1 if step is None else step
         infra.clear_step_telemetry()
-        infra._ensure_tables()  # pylint: disable=protected-access
+        infra.ensure_routing_tables()
         current_time_s = self.current_step * self.step_duration_s
 
         # Hosts: the packets generated in this step by all the applications
@@ -319,6 +318,5 @@ class RoutingEvent(EclypseEvent):
         """
         batch = PacketBatch.concat(injected)
         if sum(1 for b in injected if len(b)) > 1:
-            host_rank = infra._host_rank  # pylint: disable=protected-access
-            batch = batch.take(np.argsort(host_rank[batch.src], kind="stable"))
+            batch = batch.take(np.argsort(infra.host_ranks[batch.src], kind="stable"))
         return batch

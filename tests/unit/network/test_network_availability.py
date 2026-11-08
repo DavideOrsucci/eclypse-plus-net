@@ -144,7 +144,7 @@ def test_tables_are_not_rebuilt_if_no_node_goes_up_or_down(line_network):
 
     line_network.nodes["R"]["availability"] = 0.5
     line_network.nodes["A"]["availability"] = 0.98
-    line_network._ensure_tables()
+    line_network.ensure_routing_tables()
 
     assert line_network._fwd is tables
 

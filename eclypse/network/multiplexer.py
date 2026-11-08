@@ -33,7 +33,7 @@ def input_bandwidths(router: str, prev_nodes: list[int], infra: Network) -> list
         list[float]: The bandwidth, in Mbps, of the link from each node of
             ``prev_nodes`` to ``router``.
     """
-    adj = infra._adj  # pylint: disable=protected-access
+    adj = infra.adj
     return [
         adj.get(infra.node_name(p), {})
         .get(router, {})

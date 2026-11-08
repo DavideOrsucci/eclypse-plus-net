@@ -234,7 +234,7 @@ class Network(Infrastructure):
         In addition to the base behavior, when the availability of a node changes,
         discards the cached paths of the ``available`` view and marks the
         forwarding tables for a check: they are rebuilt at the next forwarding if
-        the set of available nodes has changed (see :meth:`_ensure_tables`).
+        the set of available nodes has changed (see :meth:`ensure_routing_tables`).
 
         Args:
             keys (tuple): The names of the changed node attributes.
@@ -341,17 +341,22 @@ class Network(Infrastructure):
         self._invalidate_routing()
         self.logger.warning(f"[FAILURE] Link {u} -> {v} removed.")
 
-    def node_index(self, name: str) -> int:
+    def node_index(self, name: str, register: bool = True) -> int:
         """Return the persistent index of a node, registering the node if needed.
 
         Args:
             name (str): The name of the node.
+            register (bool): Whether to assign a new index to a node that has none
+                yet. If False, such a node gets ``-1``. Defaults to True.
 
         Returns:
-            int: The index of the node.
+            int: The index of the node, or ``-1`` if the node has no index and
+                ``register`` is False.
         """
         idx = self._node_ids.get(name)
         if idx is None:
+            if not register:
+                return -1
             idx = len(self._node_names)
             self._node_ids[name] = idx
             self._node_names.append(name)
@@ -420,8 +425,10 @@ class Network(Infrastructure):
         self._availability_changed = False
         self._host_rank = np.full(n, -1, dtype=np.int64)
         self._host_rank[[ids[h] for h in self.hosts]] = np.arange(len(self.hosts))
+        self._host_rank.flags.writeable = False
         self._router_rank = np.full(n, -1, dtype=np.int64)
         self._router_rank[[ids[r] for r in self.routers]] = np.arange(len(self.routers))
+        self._router_rank.flags.writeable = False
 
         all_up = len(up) == self.number_of_nodes()
         rx_graph, _, rx_to_node = to_rustworkx(self, None if all_up else up)
@@ -443,7 +450,7 @@ class Network(Infrastructure):
         """Return the nodes that are up, i.e. whose availability is positive."""
         return [n for n in self.nodes() if self.is_available(n)]
 
-    def _ensure_tables(self):
+    def ensure_routing_tables(self):
         """Build the forwarding tables if they are missing or outdated.
 
         The tables are outdated after a change of the topology, or after a change
@@ -460,6 +467,30 @@ class Network(Infrastructure):
                 self._fwd = None
         if self._fwd is None:
             self.build_routing_tables()
+
+    def next_hop(self, node: str, destination: str) -> str | None:
+        """Return the next hop of the minimum-cost path from a node to another.
+
+        The answer comes from the forwarding tables used by
+        :meth:`forward_batch`, which are rebuilt first if they are outdated.
+
+        Args:
+            node (str): The node where the packet is.
+            destination (str): The destination of the packet.
+
+        Returns:
+            str | None: The neighbour of ``node`` towards ``destination``, or None
+                if ``destination`` is ``node`` itself, is unreachable, or one of the
+                two nodes is not in the network or is down.
+        """
+        self.ensure_routing_tables()
+        fwd = self._fwd
+        u = self.node_index(node, register=False)
+        d = self.node_index(destination, register=False)
+        if fwd is None or not 0 <= u < len(fwd) or not 0 <= d < len(fwd) or u == d:
+            return None
+        link = int(fwd[u, d])
+        return None if link < 0 else self._link_list[link].v
 
     # ------------------------------------------------------------------ traffic
 
@@ -513,6 +544,24 @@ class Network(Infrastructure):
                 n for n, d in self.nodes(data=True) if d.get("role", "host") == "host"
             ]
         return self._hosts
+
+    @property
+    def host_ranks(self) -> np.ndarray:
+        """Position in :attr:`hosts` of each node index, or ``-1`` for non-hosts.
+
+        The array is read-only and is replaced when the forwarding tables are
+        rebuilt (see :meth:`ensure_routing_tables`).
+        """
+        return self._host_rank
+
+    @property
+    def router_ranks(self) -> np.ndarray:
+        """Position in :attr:`routers` of each node index, or ``-1`` for non-routers.
+
+        The array is read-only and is replaced when the forwarding tables are
+        rebuilt (see :meth:`ensure_routing_tables`).
+        """
+        return self._router_rank
 
     @property
     def routers(self) -> list[str]:
@@ -608,7 +657,7 @@ class Network(Infrastructure):
         becomes idle, only the links used in the current or in the previous step
         are updated, except after a topology change, when all the links are.
         """
-        self._ensure_tables()
+        self.ensure_routing_tables()
 
         if not self._latencies_initialized:
             idle = self._links.values()
@@ -735,7 +784,7 @@ class Network(Infrastructure):
                 position in ``_link_list`` of their next-hop link, and the packets
                 already on their destination node.
         """
-        self._ensure_tables()
+        self.ensure_routing_tables()
         if not len(batch):
             return batch, np.empty(0, dtype=np.int64), PacketBatch.empty()
         batch = self._discard_lost(batch)
@@ -803,7 +852,7 @@ class Network(Infrastructure):
                 with arrived packets, in :attr:`routers` order. The packets of each
                 router are in forwarding order.
         """
-        self._ensure_tables()
+        self.ensure_routing_tables()
         transit = self.in_transit
         if current_time is None:
             self.in_transit = PacketBatch.empty()
