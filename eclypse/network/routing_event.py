@@ -14,7 +14,10 @@ from .network import (
     Network,
     PacketBatch,
 )
-from .network_application import NetworkApplication
+from .network_application import (
+    GeneratedTraffic,
+    NetworkApplication,
+)
 
 
 class RoutingEvent(EclypseEvent):
@@ -73,11 +76,13 @@ class RoutingEvent(EclypseEvent):
         """Inject the packets generated in the step into the network.
 
         The source and destination nodes of every flow are resolved through the
-        placement. Packets are discarded if either service is not placed, or if the
-        source service is placed on a router. The remaining packets are sorted by
-        source host, in :attr:`Network.hosts` order, keeping the generation order
-        within each host. The generated traffic of the application is consumed, and
-        the application is registered in the network
+        placement. Packets are discarded if either service is not placed on a node
+        of the network (counted in :attr:`Network.unplaced_packets`, with one
+        warning per application and step), or if the source service is placed on a
+        router (counted in :attr:`Network.router_source_packets`). The remaining
+        packets are sorted by source host, in :attr:`Network.hosts` order, keeping
+        the generation order within each host. The generated traffic of the
+        application is consumed, and the application is registered in the network
         (:meth:`Network.application_index`) if needed.
 
         Args:
@@ -97,43 +102,8 @@ class RoutingEvent(EclypseEvent):
             return PacketBatch.empty()
 
         flows = generated.flows
-        node_ids = infra._node_ids  # pylint: disable=protected-access
         host_rank = infra._host_rank  # pylint: disable=protected-access
-        router_rank = infra._router_rank  # pylint: disable=protected-access
-
-        placement_cache: dict[str, int] = {}
-
-        def resolve(service: str) -> int:
-            if service not in placement_cache:
-                try:
-                    node = placement.service_placement(service_id=service)
-                    idx = node_ids.get(node, -1)
-                except KeyError as e:
-                    infra.logger.debug(f"Packet dropped locally: Unmapped service {e}")
-                    idx = -1
-                placement_cache[service] = idx
-            return placement_cache[service]
-
-        n_flows = len(flows)
-        flow_src = np.full(n_flows, -1, dtype=np.int64)
-        flow_dst = np.full(n_flows, -1, dtype=np.int64)
-        per_flow = np.bincount(generated.flow, minlength=n_flows)
-        for f in np.flatnonzero(per_flow).tolist():
-            src_service, dst_service, _ = flows[f]
-            src, dst = resolve(src_service), resolve(dst_service)
-            if src < 0 or dst < 0:
-                continue
-            if router_rank[src] >= 0:
-                infra.logger.warning(
-                    f"{per_flow[f]} packets dropped: the service '{src_service}' is "
-                    f"located on node '{infra.node_name(src)}' which is configured as "
-                    f"a Router. Only Host nodes can generate traffic!"
-                )
-                continue
-            if host_rank[src] < 0:
-                continue
-            flow_src[f] = src
-            flow_dst[f] = dst
+        flow_src, flow_dst = self._resolve_flows(app, generated, placement, infra)
 
         flow = generated.flow
         src = flow_src[flow]
@@ -156,6 +126,91 @@ class RoutingEvent(EclypseEvent):
             hop=np.zeros(n, dtype=np.int64),
             arrival=np.full(n, current_time, dtype=np.float64),
         )
+
+    def _resolve_flows(
+        self,
+        app: NetworkApplication,
+        generated: GeneratedTraffic,
+        placement,
+        infra: Network,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Resolve the source and destination node of every flow of an application.
+
+        Only the flows that generated packets in the step are resolved. A flow is
+        discarded (source and destination left at -1) if either service is not
+        placed on a node of the network, or if its source service is placed on a
+        router; its packets are counted in :attr:`Network.unplaced_packets` or
+        :attr:`Network.router_source_packets`.
+
+        Args:
+            app (NetworkApplication): The application.
+            generated (GeneratedTraffic): The packets it generated in the step.
+            placement (Placement): The placement of the application services.
+            infra (Network): The network infrastructure.
+
+        Returns:
+            tuple[np.ndarray, np.ndarray]: The index of the source and destination
+                node of every flow, or -1 for the discarded flows.
+        """
+        flows = generated.flows
+        node_ids = infra._node_ids  # pylint: disable=protected-access
+        host_rank = infra._host_rank  # pylint: disable=protected-access
+        router_rank = infra._router_rank  # pylint: disable=protected-access
+
+        placement_cache: dict[str, int] = {}
+
+        def resolve(service: str) -> int:
+            if service not in placement_cache:
+                try:
+                    node = placement.service_placement(service_id=service)
+                    idx = node_ids.get(node, -1)
+                except KeyError:
+                    idx = -1
+                placement_cache[service] = idx
+            return placement_cache[service]
+
+        unplaced = 0
+        unplaced_services: set[str] = set()
+
+        n_flows = len(flows)
+        flow_src = np.full(n_flows, -1, dtype=np.int64)
+        flow_dst = np.full(n_flows, -1, dtype=np.int64)
+        per_flow = np.bincount(generated.flow, minlength=n_flows)
+        for f in np.flatnonzero(per_flow).tolist():
+            src_service, dst_service, _ = flows[f]
+            src, dst = resolve(src_service), resolve(dst_service)
+            if src < 0 or dst < 0:
+                unplaced += int(per_flow[f])
+                unplaced_services.update(
+                    s for s, i in ((src_service, src), (dst_service, dst)) if i < 0
+                )
+                continue
+            if router_rank[src] >= 0:
+                infra.router_source_packets += int(per_flow[f])
+                infra.logger.warning(
+                    f"{per_flow[f]} packets dropped: the service '{src_service}' is "
+                    f"located on node '{infra.node_name(src)}' which is configured as "
+                    f"a Router. Only Host nodes can generate traffic! Wrap the "
+                    f"placement strategy in a HostOnlyStrategy to place services "
+                    f"only on hosts."
+                )
+                continue
+            if host_rank[src] < 0:
+                # Neither a host nor a router: no node of the network runs it
+                unplaced += int(per_flow[f])
+                unplaced_services.add(src_service)
+                continue
+            flow_src[f] = src
+            flow_dst[f] = dst
+
+        if unplaced:
+            infra.unplaced_packets += unplaced
+            infra.logger.warning(
+                f"{unplaced} packets of application '{app.id}' dropped: services "
+                f"not placed on a node of the network: "
+                f"{', '.join(sorted(unplaced_services))}"
+            )
+        return flow_src, flow_dst
 
     def _input_bandwidths(
         self, router: str, prev_nodes: list[int], infra: Network
