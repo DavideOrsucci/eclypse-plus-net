@@ -15,8 +15,13 @@ A simulation typically registers, in this order:
 
 Several :class:`NetworkApplication` instances can share the same network: packet
 identifiers are allocated by the network, so they are unique across applications.
+
+Only hosts run services. To keep a placement strategy that ignores the resources of
+the nodes (e.g. random or round robin) away from the routers, wrap it in a
+:class:`HostOnlyStrategy`.
 """
 
+from .host_placement import HostOnlyStrategy
 from .network import Network, PacketBatch
 from .network_application import NetworkApplication
 from .packet_generation import PacketGenerationEvent
@@ -24,6 +29,7 @@ from .routing_event import RoutingEvent
 from .routing_metric import RoutingMetric
 
 __all__ = [
+    "HostOnlyStrategy",
     "Network",
     "NetworkApplication",
     "PacketBatch",
