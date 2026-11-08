@@ -683,6 +683,15 @@ class Network(Infrastructure):
         local_packets (int): Total number of packets delivered without crossing any
             link, because their source and destination are the same node (e.g. two
             services placed on the same host).
+        router_source_packets (int): Total number of packets discarded when
+            generated, because their source service is placed on a router (only
+            hosts run services: see :class:`~eclypse.network.HostOnlyStrategy`).
+        unplaced_packets (int): Total number of packets discarded when generated,
+            because a service of their flow is not placed on a node of the network:
+            the application is not placed yet, ECLYPSE discarded its placement
+            (e.g. after a requirement stopped being met) and has not placed it
+            again, or the service is mapped to a node that is not in the network or
+            is neither a host nor a router.
         _app_ids (dict[str, int]): Index of every application whose packets have
             entered the network, in order of first appearance.
         _packet_counter (int): Number of packet identifiers allocated so far.
@@ -757,6 +766,8 @@ class Network(Infrastructure):
         self.unroutable_packets = 0
         self.lost_packets = 0
         self.local_packets = 0
+        self.router_source_packets = 0
+        self.unplaced_packets = 0
 
     # ------------------------------------------------------------------ topology
 
