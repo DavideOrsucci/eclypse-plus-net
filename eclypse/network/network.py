@@ -409,16 +409,38 @@ class Network(Infrastructure):
         self._sync_links()
         for node in self.nodes():
             self.node_index(node)
-        n = len(self._node_names)
-        ids = self._node_ids
+        link_pos = self._index_links()
+        up = self._available_nodes()
+        self._index_nodes(up)
+        self._fwd = self._forwarding_matrix(up, link_pos)
 
+    def _index_links(self) -> dict[tuple[str, str], int]:
+        """Fix the order of the links and build the per-link arrays.
+
+        Sets ``_link_list``, ``_link_v`` and ``_link_hops``.
+
+        Returns:
+            dict[tuple[str, str], int]: The position of every link ``(u, v)`` in
+                ``_link_list``.
+        """
+        ids = self._node_ids
         link_list = list(self._links.values())
-        link_pos = {(link.u, link.v): i for i, link in enumerate(link_list)}
         self._link_list = link_list
         self._link_v = np.array([ids[link.v] for link in link_list], dtype=np.int64)
         self._link_hops = np.array([link.hop for link in link_list], dtype=object)
+        return {(link.u, link.v): i for i, link in enumerate(link_list)}
 
-        up = self._available_nodes()
+    def _index_nodes(self, up: list[str]):
+        """Build the per-node availability and role arrays.
+
+        Sets ``_alive``, ``_host_rank`` and ``_router_rank``; the two rank arrays
+        are read-only (see :attr:`host_ranks` and :attr:`router_ranks`).
+
+        Args:
+            up (list[str]): The nodes that are up.
+        """
+        n = len(self._node_names)
+        ids = self._node_ids
         alive = np.zeros(n, dtype=bool)
         alive[[ids[node] for node in up]] = True
         self._alive = alive
@@ -430,6 +452,23 @@ class Network(Infrastructure):
         self._router_rank[[ids[r] for r in self.routers]] = np.arange(len(self.routers))
         self._router_rank.flags.writeable = False
 
+    def _forwarding_matrix(
+        self, up: list[str], link_pos: dict[tuple[str, str], int]
+    ) -> np.ndarray:
+        """Compute the forwarding matrix with an all-pairs Dijkstra.
+
+        Args:
+            up (list[str]): The nodes that are up: paths only cross these nodes.
+            link_pos (dict[tuple[str, str], int]): The position of every link in
+                ``_link_list``.
+
+        Returns:
+            np.ndarray: The matrix ``fwd`` where ``fwd[u, d]`` is the position of
+                the first link of the minimum-cost path from node ``u`` to node
+                ``d``, or ``-1`` if there is none.
+        """
+        n = len(self._node_names)
+        ids = self._node_ids
         all_up = len(up) == self.number_of_nodes()
         rx_graph, _, rx_to_node = to_rustworkx(self, None if all_up else up)
         rx_paths = rx.all_pairs_dijkstra_shortest_paths(rx_graph, float)
@@ -444,7 +483,7 @@ class Network(Infrastructure):
                     vals.append(link_pos[(source, rx_to_node[p[1]])])
             if cols:
                 fwd[ids[source], cols] = vals
-        self._fwd = fwd
+        return fwd
 
     def _available_nodes(self) -> list[str]:
         """Return the nodes that are up, i.e. whose availability is positive."""
@@ -714,11 +753,32 @@ class Network(Infrastructure):
             PacketBatch: The packets delivered to their destination by this hop.
         """
         batch, link_of, local = self._route(batch)
-        m = len(batch)
-        if m == 0:
+        if not len(batch):
             return local
+        hops = self._transmit(batch, link_of, current_time)
+        self._record_telemetry(batch, link_of, hops)
+        return PacketBatch.concat([local, self._advance(batch, link_of, hops)])
 
-        # Group the packets by link, keeping the processing order inside a link
+    def _transmit(
+        self, batch: PacketBatch, link_of: np.ndarray, current_time: float
+    ) -> dict[str, np.ndarray]:
+        """Enqueue every packet on its next-hop link and compute its hop delays.
+
+        The packets are grouped by link, keeping the processing order inside a
+        link, and each link is served with :class:`Segments`. The packets that are
+        not accepted are counted in :attr:`dropped_packets`.
+
+        Args:
+            batch (PacketBatch): The packets, in processing order.
+            link_of (np.ndarray): The position in ``_link_list`` of the next-hop
+                link of every packet.
+            current_time (float): Current simulation time, in seconds.
+
+        Returns:
+            dict[str, np.ndarray]: The per-packet results of
+                :meth:`Segments.hop_delays`, in the order of ``batch``.
+        """
+        m = len(batch)
         perm = np.argsort(link_of, kind="stable")
         links_sorted = link_of[perm]
         starts = np.flatnonzero(
@@ -737,12 +797,24 @@ class Network(Infrastructure):
         # Back to the processing order
         inv = np.empty(m, dtype=np.int64)
         inv[perm] = np.arange(m)
-        acc = hops["accepted"][inv]
-        new_hop = batch.hop + acc
+        return {name: values[inv] for name, values in hops.items()}
 
+    def _record_telemetry(
+        self, batch: PacketBatch, link_of: np.ndarray, hops: dict[str, np.ndarray]
+    ):
+        """Append one row per packet to :attr:`step_columns` and :attr:`step_apps`.
+
+        Args:
+            batch (PacketBatch): The packets, in processing order.
+            link_of (np.ndarray): The position in ``_link_list`` of the link that
+                every packet has tried to cross.
+            hops (dict[str, np.ndarray]): The per-packet results of
+                :meth:`_transmit`.
+        """
+        acc = hops["accepted"]
         cols = self.step_columns
         cols["packet_id"].extend(batch.id.tolist())
-        cols["hop_count"].extend(new_hop.tolist())
+        cols["hop_count"].extend((batch.hop + acc).tolist())
         cols["hop"].extend(self._link_hops[link_of].tolist())
         for name in (
             "processing_ms",
@@ -752,19 +824,37 @@ class Network(Infrastructure):
             "queue_length",
             "arrival_at_next",
         ):
-            cols[name].extend(hops[name][inv].tolist())
+            cols[name].extend(hops[name].tolist())
         cols["dropped"].extend((~acc).tolist())
         self.step_apps.extend(batch.app.tolist())
 
-        # Advance the accepted packets
+    def _advance(
+        self, batch: PacketBatch, link_of: np.ndarray, hops: dict[str, np.ndarray]
+    ) -> PacketBatch:
+        """Move the accepted packets to the next node of their path.
+
+        The packets that reach their destination are returned; the others are
+        appended to :attr:`in_transit`.
+
+        Args:
+            batch (PacketBatch): The packets, in processing order.
+            link_of (np.ndarray): The position in ``_link_list`` of the link that
+                every packet has tried to cross.
+            hops (dict[str, np.ndarray]): The per-packet results of
+                :meth:`_transmit`.
+
+        Returns:
+            PacketBatch: The packets delivered to their destination by this hop.
+        """
+        acc = hops["accepted"]
         moved = batch.take(acc)
         moved.prev = moved.cur
         moved.cur = self._link_v[link_of[acc]]
-        moved.hop = new_hop[acc]
-        moved.arrival = hops["arrival"][inv][acc]
+        moved.hop = moved.hop + 1
+        moved.arrival = hops["arrival"][acc]
         delivered = moved.cur == moved.dst
         self.in_transit = PacketBatch.concat([self.in_transit, moved.take(~delivered)])
-        return PacketBatch.concat([local, moved.take(delivered)])
+        return moved.take(delivered)
 
     def _route(self, batch: PacketBatch) -> tuple[PacketBatch, np.ndarray, PacketBatch]:
         """Find the next-hop link of every packet.

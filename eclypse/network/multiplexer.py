@@ -17,6 +17,8 @@ import numpy as np
 from .constants import DEFAULT_BANDWIDTH_MBPS
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from .network import Network
     from .packets import PacketBatch
 
@@ -71,25 +73,65 @@ def probabilistic_merge(
     """
     rnd = random.random
     n = len(packets)
-    uniq, first, inverse = np.unique(
-        packets.prev, return_index=True, return_inverse=True
-    )
-    k = len(uniq)
-    if k == 1:
+    sources, source_of = _input_queues(packets)
+    if len(sources) == 1:
         # A single input queue: the order is fixed, one draw per packet
         for _ in range(n):
             rnd()
         return packets
 
-    # Input queues, in order of first appearance in the buffer
+    weights = input_bandwidths(router, sources, infra)
+    remaining = np.bincount(source_of, minlength=len(sources)).tolist()
+    seq = _selection_sequence(weights, remaining, rnd)
+
+    # The i-th selection of queue j takes the i-th packet of queue j
+    order = np.empty(n, dtype=np.int64)
+    order[np.argsort(seq, kind="stable")] = np.argsort(source_of, kind="stable")
+    return packets.take(order)
+
+
+def _input_queues(packets: PacketBatch) -> tuple[list[int], np.ndarray]:
+    """Split the packets of a router into input queues, one per upstream node.
+
+    Args:
+        packets (PacketBatch): The packets waiting on the router, in arrival
+            order.
+
+    Returns:
+        tuple[list[int], np.ndarray]: The index of the upstream node of every
+            input queue, in order of first appearance in ``packets``, and the
+            input queue of every packet.
+    """
+    uniq, first, inverse = np.unique(
+        packets.prev, return_index=True, return_inverse=True
+    )
+    k = len(uniq)
     appearance = np.argsort(first)
     rank = np.empty(k, dtype=np.int64)
     rank[appearance] = np.arange(k)
-    source_of = rank[inverse.reshape(-1)]
-    weights = input_bandwidths(router, uniq[appearance].tolist(), infra)
-    remaining = np.bincount(source_of, minlength=k).tolist()
+    return uniq[appearance].tolist(), rank[inverse.reshape(-1)]
 
-    active = list(range(k))
+
+def _selection_sequence(
+    weights: list[float], remaining: list[int], rnd: Callable[[], float]
+) -> np.ndarray:
+    """Draw the sequence of input queues selected by the multiplexer.
+
+    Each selection takes one random number from ``rnd`` and picks a non-empty
+    queue with probability proportional to its weight. The selections are
+    resolved in rounds, as described in :func:`probabilistic_merge`.
+
+    Args:
+        weights (list[float]): The weight of every input queue.
+        remaining (list[int]): The number of packets of every input queue. It is
+            consumed: every value is zero at the end.
+        rnd (Callable[[], float]): The source of uniform random numbers in
+            ``[0, 1)``.
+
+    Returns:
+        np.ndarray: The input queue of every selection, in selection order.
+    """
+    active = list(range(len(weights)))
     sequence = []
     while active:
         if len(active) == 1:
@@ -116,9 +158,4 @@ def probabilistic_merge(
             if emptied >= 0:
                 active.pop(emptied)
                 break
-
-    # The i-th selection of queue j takes the i-th packet of queue j
-    seq = np.concatenate(sequence)
-    order = np.empty(n, dtype=np.int64)
-    order[np.argsort(seq, kind="stable")] = np.argsort(source_of, kind="stable")
-    return packets.take(order)
+    return np.concatenate(sequence)
