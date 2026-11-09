@@ -2,8 +2,9 @@
 
 ECLYPSE discards the placement of an application when its requirements stop being
 met, and places it again at the next step. In between, the services are not placed:
-their packets are discarded and counted in ``Network.unplaced_packets``, so that
-every generated packet is accounted for.
+their packets are discarded and counted in ``Network.unplaced_packets``. The packets
+that were travelling towards a service that has meanwhile left its node are counted
+in ``Network.misdelivered_packets``. Every generated packet is accounted for.
 """
 
 from __future__ import annotations
@@ -82,11 +83,16 @@ class _Counting(PacketGenerationEvent):
 
 
 class _Recording(RoutingEvent):
-    """Count the delivered packets and record the mapping seen at every step."""
+    """Count the delivered packets and record the mapping seen at every step.
 
-    def __init__(self):
-        super().__init__(step_duration_s=0.001)
+    Also counts the delivered packets whose destination service does not run on
+    the node where they were delivered, according to the mapping of the step.
+    """
+
+    def __init__(self, step_duration_s: float = 0.001):
+        super().__init__(step_duration_s=step_duration_s)
         self.delivered = 0
+        self.wrong_node = 0
         self.mappings: list[dict[str, str]] = []
 
     def route(self, applications, infra, step=None):
@@ -96,6 +102,13 @@ class _Recording(RoutingEvent):
             def counted(batch, now):
                 out = forward(batch, now)
                 self.delivered += len(out)
+                mapping = self.mappings[-1]
+                for svc, dst in zip(
+                    out.dst_service.tolist(), out.dst.tolist(), strict=True
+                ):
+                    _, service = infra._service_names[svc]
+                    if mapping.get(service) != infra.node_name(dst):
+                        self.wrong_node += 1
                 return out
 
             infra.forward_batch = counted
@@ -104,11 +117,11 @@ class _Recording(RoutingEvent):
         super().route(applications, infra, step)
 
 
-def _simulate(tmp_path, app, strategy):
+def _simulate(tmp_path, app, strategy, step_duration_s=0.001):
     random.seed(7)
     np.random.seed(7)
     net = _network()
-    generation, routing = _Counting(), _Recording()
+    generation, routing = _Counting(), _Recording(step_duration_s)
     config = SimulationConfig(
         seed=7,
         max_steps=STEPS,
@@ -133,6 +146,7 @@ def _accounted(net: Network, routing: _Recording) -> int:
         + net.lost_packets
         + net.router_source_packets
         + net.unplaced_packets
+        + net.misdelivered_packets
         + len(net.in_transit)
     )
 
@@ -148,6 +162,21 @@ def test_packets_generated_while_the_placement_is_reset_are_counted(tmp_path):
     assert empty_steps, "the placement was never reset"
     assert routing.mappings[-1], "the application was not placed again"
     assert net.unplaced_packets > 0
+    assert routing.wrong_node == 0
+    assert generation.generated == _accounted(net, routing)
+
+
+def test_packets_in_flight_when_the_placement_is_reset_are_misdelivered(tmp_path):
+    # Steps of 0.1 ms: every packet needs a few steps to reach its destination,
+    # so some packets are travelling when the placement is reset at step 5
+    app = _application(policies=[_RaiseCpu(5, "s1", 2)])
+
+    net, generation, routing = _simulate(
+        tmp_path, app, FirstFitStrategy(), step_duration_s=0.0001
+    )
+
+    assert net.misdelivered_packets > 0
+    assert routing.wrong_node == 0
     assert generation.generated == _accounted(net, routing)
 
 

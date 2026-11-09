@@ -101,7 +101,9 @@ class RoutingEvent(EclypseEvent):
 
         flows = generated.flows
         host_rank = infra.host_ranks
-        flow_src, flow_dst = self._resolve_flows(app, generated, placement, infra)
+        flow_src, flow_dst, flow_service = self._resolve_flows(
+            app, generated, placement, infra
+        )
 
         flow = generated.flow
         src = flow_src[flow]
@@ -123,6 +125,7 @@ class RoutingEvent(EclypseEvent):
             prev=np.full(n, -1, dtype=np.int64),
             hop=np.zeros(n, dtype=np.int64),
             arrival=np.full(n, current_time, dtype=np.float64),
+            dst_service=flow_service[flow],
         )
 
     def _resolve_flows(
@@ -131,7 +134,7 @@ class RoutingEvent(EclypseEvent):
         generated: GeneratedTraffic,
         placement,
         infra: Network,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Resolve the source and destination node of every flow of an application.
 
         Only the flows that generated packets in the step are resolved. A flow is
@@ -147,8 +150,10 @@ class RoutingEvent(EclypseEvent):
             infra (Network): The network infrastructure.
 
         Returns:
-            tuple[np.ndarray, np.ndarray]: The index of the source and destination
-                node of every flow, or -1 for the discarded flows.
+            tuple[np.ndarray, np.ndarray, np.ndarray]: The index of the source and
+                destination node of every flow, or -1 for the discarded flows, and
+                the index of its destination service
+                (:meth:`Network.service_index`).
         """
         flows = generated.flows
         host_rank = infra.host_ranks
@@ -172,6 +177,7 @@ class RoutingEvent(EclypseEvent):
         n_flows = len(flows)
         flow_src = np.full(n_flows, -1, dtype=np.int64)
         flow_dst = np.full(n_flows, -1, dtype=np.int64)
+        flow_service = np.full(n_flows, -1, dtype=np.int64)
         per_flow = np.bincount(generated.flow, minlength=n_flows)
         for f in np.flatnonzero(per_flow).tolist():
             src_service, dst_service, _ = flows[f]
@@ -199,6 +205,7 @@ class RoutingEvent(EclypseEvent):
                 continue
             flow_src[f] = src
             flow_dst[f] = dst
+            flow_service[f] = infra.service_index(app.id, dst_service)
 
         if unplaced:
             infra.unplaced_packets += unplaced
@@ -207,7 +214,7 @@ class RoutingEvent(EclypseEvent):
                 f"not placed on a node of the network: "
                 f"{', '.join(sorted(unplaced_services))}"
             )
-        return flow_src, flow_dst
+        return flow_src, flow_dst, flow_service
 
     def _build_probabilistic_queue(
         self, router: str, packets: PacketBatch, infra: Network
@@ -253,6 +260,10 @@ class RoutingEvent(EclypseEvent):
     ):
         """Run one step of the network: inject, forward and update the latencies.
 
+        The network first records where every service runs in this step (see
+        :meth:`Network.update_service_hosts`), so that the packets that reach a
+        node their destination service has left are not delivered.
+
         Args:
             applications (list[tuple[NetworkApplication, Placement]]): The
                 applications whose packets are injected, with their placements, in
@@ -265,6 +276,8 @@ class RoutingEvent(EclypseEvent):
         infra.clear_step_telemetry()
         infra.ensure_routing_tables()
         current_time_s = self.current_step * self.step_duration_s
+        for app, placement in applications:
+            infra.update_service_hosts(app.id, placement.mapping)
 
         # Hosts: the packets generated in this step by all the applications
         batches = [

@@ -20,6 +20,8 @@ The names moved to the other modules are re-exported here, for compatibility.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import rustworkx as rx  # type: ignore
 
@@ -49,6 +51,9 @@ from .paths import (
     path_algorithm,
     to_rustworkx,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 __all__ = [
     "ARRIVAL_TOLERANCE_S",
@@ -134,8 +139,20 @@ class Network(Infrastructure):
             (e.g. after a requirement stopped being met) and has not placed it
             again, or the service is mapped to a node that is not in the network or
             is neither a host nor a router.
+        misdelivered_packets (int): Total number of packets that reached their
+            destination node after their destination service had left it: ECLYPSE
+            moved the service to another node, or discarded the placement of its
+            application, while the packet was travelling. They are not delivered
+            to the service, so :meth:`forward_batch` does not return them.
         _app_ids (dict[str, int]): Index of every application whose packets have
             entered the network, in order of first appearance.
+        _services (dict[str, dict[str, int]]): Index of every registered service,
+            grouped by application (see :meth:`service_index`).
+        _service_names (list[tuple[str, str]]): Application and service of every
+            service index.
+        _service_host (np.ndarray): Index of the node that runs each service in the
+            current step, or ``-1`` if the service is not placed. Its length can
+            exceed the number of services.
         _packet_counter (int): Number of packet identifiers allocated so far.
         _node_ids (dict[str, int]): Persistent index of every node ever added.
             Indices are never reused, so packets in transit keep valid references
@@ -210,6 +227,10 @@ class Network(Infrastructure):
         self.local_packets = 0
         self.router_source_packets = 0
         self.unplaced_packets = 0
+        self.misdelivered_packets = 0
+        self._services: dict[str, dict[str, int]] = {}
+        self._service_names: list[tuple[str, str]] = []
+        self._service_host = np.empty(0, dtype=np.int64)
 
     # ------------------------------------------------------------------ topology
 
@@ -573,6 +594,57 @@ class Network(Infrastructure):
         """Identifiers of the registered applications, in index order."""
         return list(self._app_ids)
 
+    def service_index(self, app_id: str, service: str) -> int:
+        """Return the index of a service, registering it if needed.
+
+        The index identifies the destination service of each packet
+        (:attr:`PacketBatch.dst_service`). Indices are assigned in order of
+        registration, starting from 0, and a new service is not placed until
+        :meth:`update_service_hosts` places it.
+
+        Args:
+            app_id (str): The identifier of the application of the service.
+            service (str): The identifier of the service.
+
+        Returns:
+            int: The index of the service.
+        """
+        services = self._services.setdefault(app_id, {})
+        idx = services.get(service)
+        if idx is None:
+            idx = len(self._service_names)
+            services[service] = idx
+            self._service_names.append((app_id, service))
+            if idx >= len(self._service_host):
+                grown = np.full(max(16, 2 * idx), -1, dtype=np.int64)
+                grown[: len(self._service_host)] = self._service_host
+                self._service_host = grown
+        return idx
+
+    def update_service_hosts(self, app_id: str, mapping: Mapping[str, str]):
+        """Record the node that runs each service of an application.
+
+        Called at every step, before the packets are forwarded, so that the
+        packets that reach their destination node are delivered only if their
+        destination service still runs there (see :attr:`misdelivered_packets`).
+
+        Args:
+            app_id (str): The identifier of the application.
+            mapping (Mapping[str, str]): The node of every placed service of the
+                application. The registered services of the application that are
+                not in ``mapping``, or are mapped to a node that is not in the
+                network, are not placed.
+        """
+        for service in mapping:
+            self.service_index(app_id, service)
+        hosts = self._service_host
+        for service, idx in self._services.get(app_id, {}).items():
+            node = mapping.get(service)
+            if node is not None and node in self:
+                hosts[idx] = self.node_index(node)
+            else:
+                hosts[idx] = -1
+
     # ------------------------------------------------------------------ roles
 
     @property
@@ -745,6 +817,10 @@ class Network(Infrastructure):
         placed on the same node) do not cross any link: they are returned at once,
         unchanged and without telemetry rows, and counted in :attr:`local_packets`.
 
+        A packet that reaches its destination node after its destination service
+        has left it is not returned, and is counted in
+        :attr:`misdelivered_packets` (see :meth:`update_service_hosts`).
+
         Args:
             batch (PacketBatch): The packets to forward, in processing order.
             current_time (float): Current simulation time, in seconds.
@@ -752,12 +828,48 @@ class Network(Infrastructure):
         Returns:
             PacketBatch: The packets delivered to their destination by this hop.
         """
-        batch, link_of, local = self._route(batch)
-        if not len(batch):
-            return local
-        hops = self._transmit(batch, link_of, current_time)
-        self._record_telemetry(batch, link_of, hops)
-        return PacketBatch.concat([local, self._advance(batch, link_of, hops)])
+        batch, link_of, arrived = self._route(batch)
+        if len(batch):
+            hops = self._transmit(batch, link_of, current_time)
+            self._record_telemetry(batch, link_of, hops)
+            arrived = PacketBatch.concat([arrived, self._advance(batch, link_of, hops)])
+        return self._discard_misdelivered(arrived)
+
+    def _discard_misdelivered(self, batch: PacketBatch) -> PacketBatch:
+        """Discard the packets whose destination service has left their node.
+
+        They are counted in :attr:`misdelivered_packets`, with one warning per
+        service. Packets not addressed to a service are always kept.
+
+        Args:
+            batch (PacketBatch): The packets on their destination node.
+
+        Returns:
+            PacketBatch: The packets whose destination service runs on their node.
+        """
+        svc = batch.dst_service
+        tracked = svc >= 0
+        if not tracked.any():
+            return batch
+        wrong = np.zeros(len(batch), dtype=bool)
+        wrong[tracked] = self._service_host[svc[tracked]] != batch.cur[tracked]
+        if not wrong.any():
+            return batch
+        self.misdelivered_packets += int(wrong.sum())
+        services, counts = np.unique(svc[wrong], return_counts=True)
+        for idx, count in zip(services.tolist(), counts.tolist(), strict=True):
+            app_id, service = self._service_names[idx]
+            host = int(self._service_host[idx])
+            where = (
+                f"it now runs on node {self._node_names[host]}"
+                if host >= 0
+                else "it is not placed"
+            )
+            self.logger.warning(
+                f"{_packets(count)} of application '{app_id}' misdelivered: the "
+                f"service '{service}' left their destination node and {where}"
+            )
+        return batch.take(~wrong)
 
     def _transmit(
         self, batch: PacketBatch, link_of: np.ndarray, current_time: float

@@ -20,6 +20,7 @@ PACKET_FIELDS = (
     "prev",
     "hop",
     "arrival",
+    "dst_service",
 )
 """Names of the fields of a :class:`PacketBatch`."""
 
@@ -52,6 +53,11 @@ class PacketBatch:
             ``cur``: its generation time for a packet just injected by its source,
             and the arrival time at the end of the last hop otherwise. A packet is
             forwarded only once the current time has reached its arrival time.
+        dst_service (np.ndarray): Index of the destination service, as returned by
+            :meth:`Network.service_index`, or ``-1`` if the packet is not
+            addressed to a service. When a packet reaches its destination node, the
+            network checks that the service still runs there (see
+            :attr:`Network.misdelivered_packets`).
     """
 
     __slots__ = PACKET_FIELDS
@@ -66,14 +72,18 @@ class PacketBatch:
     prev: np.ndarray
     hop: np.ndarray
     arrival: np.ndarray
+    dst_service: np.ndarray
 
     def __init__(self, **fields: np.ndarray):
         """Create a batch from its field arrays.
 
         Args:
             **fields (np.ndarray): One array per name in :data:`PACKET_FIELDS`, all
-                with the same length.
+                with the same length. ``dst_service`` can be omitted: the packets
+                are then not addressed to a service (``-1``).
         """
+        if "dst_service" not in fields:
+            fields["dst_service"] = np.full(len(fields["id"]), -1, dtype=np.int64)
         for f in PACKET_FIELDS:
             setattr(self, f, fields[f])
 
