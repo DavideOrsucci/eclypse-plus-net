@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime as dt
+from importlib import import_module
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -99,6 +100,11 @@ class _SafeJSONEncoder(json.JSONEncoder):
             return o.isoformat()
         if isinstance(o, (set, tuple)):
             return list(o)
+        np = import_module("numpy")
+        if isinstance(o, np.generic):
+            return o.item()
+        if isinstance(o, np.ndarray):
+            return o.tolist()
         return super().default(o)
 
 
@@ -113,13 +119,7 @@ def _normalize_for_json(value: Any) -> Any:
             for key, item in value.items()
         }
 
-    if isinstance(value, list):
-        return [_normalize_for_json(item) for item in value]
-
-    if isinstance(value, tuple):
-        return [_normalize_for_json(item) for item in value]
-
-    if isinstance(value, set):
+    if isinstance(value, (list, tuple, set)):
         return [_normalize_for_json(item) for item in value]
 
     return value

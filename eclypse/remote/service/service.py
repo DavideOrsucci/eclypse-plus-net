@@ -149,18 +149,19 @@ class Service(ABC):
             name=f"task-{self.id}",
         )
         self._init_thread()
+        # Services start one at a time; connecting here lets requests to a deployed
+        # service wait on its loop until it starts, instead of failing.
+        if self._communication_interface == "mpi":
+            self._comm = EclypseMPI(self)
+        else:
+            self._comm = EclypseREST(self)
+        self._comm.connect()
 
     def _start(self):
         """Starts the service."""
         if not self.deployed:
             raise RuntimeError(f"Service {self.id} is not deployed on any node")
 
-        if self._communication_interface == "mpi":
-            self._comm = EclypseMPI(self)
-
-        if self._communication_interface == "rest":
-            self._comm = EclypseREST(self)
-        self._comm.connect()
         self._running = True
         self._thread.start()
 
@@ -294,12 +295,13 @@ class Service(ABC):
 
 # pylint: disable=protected-access
 def _start_loop(service: Service):
-    asyncio.set_event_loop(service.event_loop)
+    loop = service.event_loop
+    asyncio.set_event_loop(loop)
     try:
         if service._run_task is not None:
-            service.event_loop.run_until_complete(service._run_task)
+            loop.run_until_complete(service._run_task)
         else:
-            service.event_loop.run_forever()
+            loop.run_forever()
     except asyncio.CancelledError:
         pass
     except RuntimeError as e:
@@ -309,9 +311,13 @@ def _start_loop(service: Service):
             print_exception(e, f"{service.id}", _exception_logger(service))
     except Exception as e:
         print_exception(e, f"{service.id}", _exception_logger(service))
-    if service._comm is not None:
-        service._comm.disconnect()
-    service.event_loop.close()
+    finally:
+        try:
+            if service._comm is not None:
+                service._comm.disconnect()
+        finally:
+            service._running = False
+            loop.close()
 
 
 def _exception_logger(service: Service) -> Logger:

@@ -15,6 +15,23 @@ from eclypse.utils.constants import (
 )
 
 
+def test_wait_reports_write_failure_only_after_shutdown(
+    simulation_config, sample_infrastructure
+):
+    simulator = Simulator(sample_infrastructure, simulation_config)
+    simulator._reporter.error = "[json/service] Error during write: write boom"
+    simulator._finished.clear()
+    try:
+        simulator.wait(timeout=0)
+        simulator._finished.set()
+        with pytest.raises(
+            RuntimeError, match=r"Simulation report is incomplete.*write boom"
+        ):
+            simulator.wait(timeout=0)
+    finally:
+        simulator._event_loop.close()
+
+
 @pytest.mark.asyncio
 async def test_local_simulator_fire_and_finalize(
     simulation_config, sample_infrastructure
@@ -129,10 +146,12 @@ async def test_local_simulator_run_handles_timeout_and_shutdown(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fail_during_shutdown", [False, True])
 async def test_local_simulator_run_enqueues_stop_after_event_failures(
     monkeypatch,
     simulation_config,
     sample_infrastructure,
+    fail_during_shutdown,
 ):
     simulator = Simulator(sample_infrastructure, simulation_config)
     simulator._status = SimulationState.RUNNING
@@ -177,6 +196,8 @@ async def test_local_simulator_run_enqueues_stop_after_event_failures(
         lifecycle.append(("fire", (event_name, triggered_by)))
         if event_name == "periodic":
             raise RuntimeError("boom")
+        if event_name == STOP_EVENT and fail_during_shutdown:
+            raise RuntimeError("shutdown failed")
 
     async def fake_sleep(_: float):
         lifecycle.append(("sleep", None))
@@ -202,5 +223,8 @@ async def test_local_simulator_run_enqueues_stop_after_event_failures(
     assert ("enqueue", (STOP_EVENT, None)) in lifecycle
     assert ("fire", ("periodic", None)) in lifecycle
     assert ("fire", (STOP_EVENT, None)) in lifecycle
-    assert printed == [("boom", "Simulator")]
+    assert printed == [("boom", "Simulator")] + (
+        [("shutdown failed", "Simulator")] if fail_during_shutdown else []
+    )
+    assert lifecycle.count(("enqueue", (STOP_EVENT, None))) == 1
     assert lifecycle[-1] == ("stop", None)

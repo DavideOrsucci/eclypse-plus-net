@@ -306,10 +306,10 @@ class Infrastructure(AssetGraph):  # pylint: disable=too-few-public-methods
     def processing_time(self, source: str, target: str) -> float:
         """Compute the total processing time of all nodes along the path.
 
-        Calls :py:meth:`path` first to ensure the node list is cached, then
-        sums the ``processing_time`` attribute of every node on that path.
-        Returns 0.0 when source and target are the same node or when no path
-        exists.
+        Calls [path][eclypse.graph.infrastructure.Infrastructure.path] first to ensure
+        the node list is cached, then sums the ``processing_time`` attribute of every
+        node on that path. Returns 0.0 when source and target are the same node or when
+        no path exists.
 
         Args:
             source (str): The name of the source node.
@@ -475,18 +475,12 @@ class Infrastructure(AssetGraph):  # pylint: disable=too-few-public-methods
             def reverse_edge(u, v):
                 return filter_edge(v, u)
 
-            if self.is_directed():
-                self._available._succ = FilterAdjacency(
-                    self._succ, filter_node, filter_edge
-                )
-                self._available._pred = FilterAdjacency(
-                    self._pred, filter_node, reverse_edge
-                )
-
-            else:
-                self._available._adj = FilterAdjacency(
-                    self._adj, filter_node, filter_edge
-                )
+            self._available._succ = FilterAdjacency(
+                self._succ, filter_node, filter_edge
+            )
+            self._available._pred = FilterAdjacency(
+                self._pred, filter_node, reverse_edge
+            )
         return self._available
 
     def is_available(self, n: str):

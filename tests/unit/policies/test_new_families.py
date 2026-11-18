@@ -19,12 +19,16 @@ def test_compose_family_combines_policies():
     assert graph.nodes["a"]["cpu"] == 81
     assert graph.nodes["a"]["ram"] == 33
 
+    graph.nodes["a"]["cpu"] = 0
     policies.compose.conditional(lambda _: True, add_cpu)(graph)
     assert graph.nodes["a"]["cpu"] == 81
+    graph.nodes["a"]["ram"] = 0
     policies.compose.conditional(lambda _: False, add_ram)(graph)
-    assert graph.nodes["a"]["ram"] == 33
+    assert graph.nodes["a"]["ram"] == 0
 
+    graph.nodes["a"]["cpu"] = 0
     policies.compose.one_of(add_cpu)(graph)
+    assert graph.nodes["a"]["cpu"] == 81
     policies.compose.weighted_choice([add_ram], [1.0])(graph)
     assert graph.nodes["a"]["ram"] == 33
 
@@ -134,3 +138,19 @@ def test_constraints_family_enforces_numeric_invariants():
 
     policies.constraints.normalise(100, node_assets="cpu")(graph)
     assert graph.nodes["a"]["cpu"] + graph.nodes["b"]["cpu"] == 100
+
+
+def test_topology_skips_missing_existing_and_unrewirable_edges():
+    graph = build_graph()
+    original_nodes = {node: dict(data) for node, data in graph.nodes.data()}
+    original_edges = list(graph.edges.data())
+    policies.topology.add_node("a", cpu=1)(graph)
+    policies.topology.add_edge("a", "b", latency=1)(graph)
+    policies.topology.add_edge("missing", "b", latency=1)(graph)
+    policies.topology.churn(add_probability=1, candidate_nodes={"a": {"cpu": 1}})(graph)
+    policies.topology.rewire([("missing", "edge"), ("a", "b")])(graph)
+    policies.topology.rewire([("a", "b")], probability=0)(graph)
+    assert list(graph.edges.data()) == original_edges
+    assert {node: dict(data) for node, data in graph.nodes.data()} == original_nodes
+    policies.topology.remove_node("a")(graph)
+    assert list(graph.nodes) == ["b"]
